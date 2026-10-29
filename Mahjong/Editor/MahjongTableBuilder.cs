@@ -182,6 +182,26 @@ public static class MahjongTableBuilder
         Debug.Log("[Mahjong] Applied materials to " + count + " table(s).");
     }
 
+    /// Menu: Tools > Mahjong > Save Selected Table As Prefab
+    [MenuItem("Tools/Mahjong/Save Selected Table As Prefab")]
+    public static void SaveAsPrefab()
+    {
+        var go = Selection.activeGameObject;
+        if (go == null || go.GetComponent<MahjongGame>() == null)
+        {
+            EditorUtility.DisplayDialog("Mahjong", "Select the MahjongTable object in the scene first.", "OK");
+            return;
+        }
+        string path = EditorUtility.SaveFilePanelInProject("Save Mahjong Table Prefab", go.name, "prefab", "Where to save the table prefab", "Assets/Mahjong");
+        if (string.IsNullOrEmpty(path)) return;
+        var prefab = PrefabUtility.SaveAsPrefabAssetAndConnect(go, path, InteractionMode.UserAction);
+        if (prefab != null)
+        {
+            EditorGUIUtility.PingObject(prefab);
+            Debug.Log("[Mahjong] Saved " + path + ". To share it, right-click the Mahjong folder > Export Package.");
+        }
+    }
+
     static void ApplyTiles(MahjongTile[] tiles, MahjongGame game)
     {
         if (tiles == null) return;

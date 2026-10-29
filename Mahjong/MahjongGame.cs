@@ -50,6 +50,9 @@ public class MahjongGame : UdonSharpBehaviour
     [Tooltip("Pause after a discard nobody can call, before the next player draws.")]
     public float discardPauseSeconds = 1.2f;
 
+    [Tooltip("Seconds before the next hand starts on its own after a win or draw. 0 = wait for Next Hand.")]
+    public float nextHandSeconds = 12f;
+
     [Tooltip("How long call announcements (PON!, RIICHI! ...) stay up.")]
     public float announceSeconds = 2.5f;
 
@@ -196,7 +199,8 @@ public class MahjongGame : UdonSharpBehaviour
 
     void Update()
     {
-        if (phase == PhaseCalls && callWindowSeconds > 0f && statusText != null && Time.time >= nextCountdownRefresh)
+        bool counting = (phase == PhaseCalls && callWindowSeconds > 0f) || (phase == PhaseHandOver && nextHandSeconds > 0f);
+        if (counting && statusText != null && Time.time >= nextCountdownRefresh)
         {
             nextCountdownRefresh = Time.time + 0.25f;
             statusText.text = BuildStatus();
@@ -570,10 +574,11 @@ public class MahjongGame : UdonSharpBehaviour
     public void _OnTimer()
     {
         if (!Networking.IsOwner(gameObject)) return;
-        if (phase != PhaseCalls && phase != PhasePause) return;
+        if (phase != PhaseCalls && phase != PhasePause && phase != PhaseHandOver) return;
         int remaining = timerDeadline - Networking.GetServerTimeInMilliseconds();
         if (remaining > 100) return; // a newer timer is running
 
+        if (phase == PhaseHandOver) { DoNextHand(); return; }
         if (phase == PhasePause) AdvanceAfterDiscard();
         else
         {
@@ -595,7 +600,8 @@ public class MahjongGame : UdonSharpBehaviour
         if (!Networking.IsOwner(gameObject)) return;
         botStepQueued = false;
         ScheduleBots();
-        if (phase != PhasePause && !(phase == PhaseCalls && callWindowSeconds > 0f)) return;
+        bool timed = phase == PhasePause || (phase == PhaseCalls && callWindowSeconds > 0f) || (phase == PhaseHandOver && nextHandSeconds > 0f);
+        if (!timed) return;
         int remaining = timerDeadline - Networking.GetServerTimeInMilliseconds();
         SendCustomEventDelayedSeconds(nameof(_OnTimer), remaining > 0 ? remaining / 1000f + 0.05f : 0.1f);
     }
@@ -856,7 +862,11 @@ public class MahjongGame : UdonSharpBehaviour
             phase = PhaseGameOver;
             lastEvent += "\n<b>Game over!</b> " + Standings();
         }
-        else phase = PhaseHandOver;
+        else
+        {
+            phase = PhaseHandOver;
+            if (nextHandSeconds > 0f) StartTimer(nextHandSeconds);
+        }
     }
 
     bool EvaluateRon(int s)
@@ -1079,6 +1089,19 @@ public class MahjongGame : UdonSharpBehaviour
     }
 
     // ================= bots (run by the owner) =================
+    // Discards maximise tile acceptance at the lowest shanten, keep dora / red fives / yakuhai pairs, and steer
+    // open hands toward the yaku they're going for. Against riichi they push when close to tenpai and fold
+    // (genbutsu, suji, visible honors) otherwise. Calls are only made when they speed up a hand that keeps a yaku.
+
+    const int RouteClosed = 0;    // closed hand: riichi / menzen tsumo always give a yaku
+    const int RouteFree = 1;      // open with a yakuhai triplet already: anything goes
+    const int RouteTanyao = 2;    // open, all simples so far
+    const int RouteHonitsu = 3;   // open, one suit + honors (RouteHonitsu + suit)
+    const int RouteNone = -1;     // open with no clear yaku: just play fast
+
+    int[] botUnseen = new int[34];
+    int[] botShanten = new int[34];
+    int[] botDanger = new int[34];
 
     void ScheduleBots()
     {
@@ -1124,92 +1147,322 @@ public class MahjongGame : UdonSharpBehaviour
             DoDiscard(s, drawn[s] >= 0 ? drawn[s] : BotTileOfType(s, BotFirstType(s)), false);
             return;
         }
-        if (drawn[s] >= 0 && kanCount < 4 && Remaining() > 0)
-        {
-            for (int x = 0; x < 34; x++)
-            {
-                if (tc[x] == 4) { DoOwnKan(s, x); return; }
-            }
-        }
         int t = BotChooseDiscard(s);
+        int kan = BotKanChoice(s, t);
+        if (kan >= 0) { DoOwnKan(s, kan); return; }
         DoDiscard(s, BotTileOfType(s, t), botRiichi);
     }
 
-    /// Picks the tile type to discard and sets botRiichi. Stays tenpai when it can, defends against riichi
-    /// when it can't, otherwise throws the least useful tile.
+    /// Picks the tile type to discard and sets botRiichi. Leaves botShanten filled for BotKanChoice.
     int BotChooseDiscard(int s)
     {
         botRiichi = false;
         CountClosed(s, tc);
-        bool threat = false;
-        for (int o = 0; o < 4; o++) if (o != s && riichi[o]) threat = true;
+        BotComputeUnseen(s);
+        int riichiThreats = BotComputeDanger(s);
+        int route = BotRoute(s);
+        int mc = meldCount[s];
+
+        int minSh = 99;
+        for (int x = 0; x < 34; x++)
+        {
+            botShanten[x] = 99;
+            if (tc[x] == 0) continue;
+            tc[x]--;
+            botShanten[x] = rules.Shanten(tc, mc);
+            tc[x]++;
+            if (botShanten[x] < minSh) minSh = botShanten[x];
+        }
+
+        // Push when tenpai, or one away with plenty of wall left; otherwise fold against riichi.
+        bool fold = riichiThreats > 0 && !(minSh == 0 || (minSh == 1 && Remaining() >= 40));
 
         int best = -1;
-        int bestScore = 0;
+        int bestValue = 0;
+        bool bestTenpaiOk = false;
+        int bestWaits = 0;
+        for (int x = 0; x < 34; x++)
+        {
+            if (tc[x] == 0) continue;
+            int value = -1000 * (botShanten[x] - minSh);
+            int waits = 0;
+            bool tenpaiOk = false;
+            if (botShanten[x] == minSh)
+            {
+                tc[x]--;
+                waits = rules.Ukeire(tc, mc, botUnseen);
+                if (botShanten[x] == 0) tenpaiOk = !BotFuritenAfter(s, x);
+                tc[x]++;
+                value += 8 * waits;
+                if (botShanten[x] == 0 && !tenpaiOk) value -= 150;   // discarding into furiten
+            }
+            value -= 25 * BotDoraValue(s, x);
+            if (IsYakuhaiFor(s, x) && tc[x] >= 2) value -= 30;
+            if (route == RouteTanyao && rules.IsTermOrHonor(x)) value += 60;
+            if (route >= RouteHonitsu && x < 27 && x / 9 != route - RouteHonitsu) value += 60;
+            if (rules.IsTermOrHonor(x) && tc[x] == 1) value += 2;   // early on, isolated terminals / honors go first
+
+            if (fold) value = -1000 * botDanger[x] + value / 50;
+            else value -= 15 * botDanger[x];
+
+            if (best < 0 || value > bestValue)
+            {
+                best = x;
+                bestValue = value;
+                bestTenpaiOk = tenpaiOk;
+                bestWaits = waits;
+            }
+        }
+
+        if (best >= 0 && botShanten[best] == 0 && route == RouteClosed && bestTenpaiOk && bestWaits > 0)
+            botRiichi = scores[s] >= 1000 && Remaining() >= 4;
+        return best;
+    }
+
+    /// A kan type to declare now (with intended discard type t already chosen), or -1.
+    int BotKanChoice(int s, int t)
+    {
+        if (drawn[s] < 0 || kanCount >= 4 || Remaining() <= 0 || t < 0) return -1;
+        for (int o = 0; o < 4; o++) if (o != s && riichi[o]) return -1;   // no extra dora while someone's in riichi
+        CountClosed(s, tc);
+        int current = botShanten[t];
+        for (int x = 0; x < 34; x++)
+        {
+            if (tc[x] == 4)
+            {
+                tc[x] = 0;
+                int after = rules.Shanten(tc, meldCount[s] + 1);
+                tc[x] = 4;
+                if (after <= current) return x;
+            }
+            else if (tc[x] >= 1 && PonMeldOf(s, x) >= 0 && botShanten[x] <= current) return x;
+        }
+        return -1;
+    }
+
+    /// Bots only call when it lowers shanten and the hand keeps a way to win (yakuhai, tanyao or honitsu).
+    void BotCall(int s)
+    {
+        int opts = callOptions[s];
+        if ((opts & OptRon) != 0) { DoRespond(s, RespRon, 0); return; }
+        int t = lastDiscard / 4;
+        bool threat = false;
+        for (int o = 0; o < 4; o++) if (o != s && riichi[o]) threat = true;
+        CountClosed(s, tc);
+        int mc = meldCount[s];
+        int before = rules.Shanten(tc, mc);
+        if (threat && before >= 1) { DoRespond(s, RespPass, 0); return; }
+
+        if ((opts & OptPon) != 0 && BotCallKeepsYaku(s, t, t))
+        {
+            tc[t] -= 2;
+            int after = BotBestShantenAfterCall(mc + 1);
+            tc[t] += 2;
+            if (after < before || (IsYakuhaiFor(s, t) && after <= before)) { DoRespond(s, RespPon, 0); return; }
+        }
+        if ((opts & OptChi) != 0)
+        {
+            int bestSt = -1;
+            int bestAfter = before;
+            for (int st = t - 2; st <= t; st++)
+            {
+                if (!ChiPossible(st, t) || !BotCallKeepsYaku(s, st, st + 2)) continue;
+                for (int x = st; x <= st + 2; x++) if (x != t) tc[x]--;
+                int after = BotBestShantenAfterCall(mc + 1);
+                for (int x = st; x <= st + 2; x++) if (x != t) tc[x]++;
+                if (after < bestAfter) { bestAfter = after; bestSt = st; }
+            }
+            if (bestSt >= 0) { DoRespond(s, RespChi, bestSt); return; }
+        }
+        DoRespond(s, RespPass, 0);
+    }
+
+    /// Best shanten after discarding one tile from tc (used right after a call takes tiles out).
+    int BotBestShantenAfterCall(int meldsAfter)
+    {
+        int best = 99;
         for (int x = 0; x < 34; x++)
         {
             if (tc[x] == 0) continue;
             tc[x]--;
-            bool tenpai = rules.IsTenpai(tc, meldCount[s]);
+            int sh = rules.Shanten(tc, meldsAfter);
             tc[x]++;
-            if (!tenpai) continue;
-            int v = BotKeepScore(s, x) - (threat && BotIsSafe(s, x) ? 50 : 0);
-            if (best < 0 || v < bestScore) { best = x; bestScore = v; }
-        }
-        if (best >= 0)
-        {
-            botRiichi = IsClosed(s) && scores[s] >= 1000 && Remaining() >= 4;
-            return best;
-        }
-
-        best = -1;
-        for (int x = 0; x < 34; x++)
-        {
-            if (tc[x] == 0) continue;
-            int v = BotKeepScore(s, x);
-            if (threat) v += BotIsSafe(s, x) ? -100 : 20;
-            if (best < 0 || v < bestScore) { best = x; bestScore = v; }
+            if (sh < best) best = sh;
         }
         return best;
     }
 
-    /// Higher = more worth keeping. Uses the counts in tc.
-    int BotKeepScore(int s, int x)
+    /// Would a new open set covering tile types lo..hi (a pon has lo == hi) leave the hand a realistic yaku?
+    /// tc holds the closed hand before the call.
+    bool BotCallKeepsYaku(int s, int lo, int hi)
+    {
+        if (lo == hi && IsYakuhaiFor(s, lo)) return true;
+        if (BotHasYakuhaiMeld(s)) return true;
+        for (int y = 27; y < 34; y++) if (tc[y] >= 3 && IsYakuhaiFor(s, y)) return true;
+
+        // Tanyao: the new set and every meld simple, at most two terminals / honors left to throw.
+        bool simpleSet = !rules.IsTermOrHonor(lo) && !rules.IsTermOrHonor(hi);
+        if (simpleSet && BotMeldsAllSimple(s))
+        {
+            int junk = 0;
+            for (int x = 0; x < 34; x++) if (rules.IsTermOrHonor(x)) junk += tc[x];
+            if (junk <= 2) return true;
+        }
+
+        // Honitsu: one suit plus honors, at most three off-suit tiles left to throw.
+        int suit = lo < 27 ? lo / 9 : BotMainSuit();
+        if (BotMeldsFitSuit(s, suit))
+        {
+            int off = 0;
+            for (int x = 0; x < 27; x++) if (x / 9 != suit) off += tc[x];
+            if (off <= 3) return true;
+        }
+        return false;
+    }
+
+    int BotRoute(int s)
+    {
+        if (IsClosed(s)) return RouteClosed;
+        if (BotHasYakuhaiMeld(s)) return RouteFree;
+        if (BotMeldsAllSimple(s)) return RouteTanyao;
+        int suit = -1;
+        for (int m = 0; m < meldCount[s]; m++)
+        {
+            int t = melds[s * MeldSlots + m * 4] / 4;
+            if (t < 27) suit = t / 9;
+        }
+        if (suit < 0) suit = BotMainSuit();
+        if (BotMeldsFitSuit(s, suit)) return RouteHonitsu + suit;
+        return RouteNone;
+    }
+
+    bool BotMeldsAllSimple(int s)
+    {
+        for (int k = 0; k < meldCount[s] * 4; k++)
+        {
+            int id = melds[s * MeldSlots + k];
+            if (id >= 0 && rules.IsTermOrHonor(id / 4)) return false;
+        }
+        return true;
+    }
+
+    bool BotMeldsFitSuit(int s, int suit)
+    {
+        for (int k = 0; k < meldCount[s] * 4; k++)
+        {
+            int id = melds[s * MeldSlots + k];
+            if (id >= 0 && id / 4 < 27 && id / 36 != suit) return false;
+        }
+        return true;
+    }
+
+    /// The suit with the most tiles in tc.
+    int BotMainSuit()
+    {
+        int best = 0;
+        int bestCount = -1;
+        for (int suit = 0; suit < 3; suit++)
+        {
+            int n = 0;
+            for (int x = suit * 9; x < suit * 9 + 9; x++) n += tc[x];
+            if (n > bestCount) { bestCount = n; best = suit; }
+        }
+        return best;
+    }
+
+    /// Fills botUnseen: copies of each type the bot can't see (not in its hand, any pond, any meld or the dora indicators).
+    void BotComputeUnseen(int s)
+    {
+        for (int x = 0; x < 34; x++) botUnseen[x] = 4 - tc[x];
+        for (int o = 0; o < 4; o++)
+        {
+            for (int i = 0; i < discardCount[o]; i++)
+            {
+                int k = o * DiscardSlots + i;
+                if (discards[k] >= 0 && (discardFlags[k] & 2) == 0) botUnseen[discards[k] / 4]--;
+            }
+            for (int k = 0; k < meldCount[o] * 4; k++)
+            {
+                int id = melds[o * MeldSlots + k];
+                if (id >= 0) botUnseen[id / 4]--;
+            }
+        }
+        for (int d = 0; d < 1 + kanCount; d++) botUnseen[wall[122 + d] / 4]--;
+        for (int x = 0; x < 34; x++) if (botUnseen[x] < 0) botUnseen[x] = 0;
+    }
+
+    /// Fills botDanger (riichi players count double, players with 3+ open melds count once) and returns
+    /// the number of opponents in riichi.
+    int BotComputeDanger(int s)
+    {
+        for (int x = 0; x < 34; x++) botDanger[x] = 0;
+        int riichiCount = 0;
+        for (int o = 0; o < 4; o++)
+        {
+            if (o == s) continue;
+            int weight = riichi[o] ? 2 : (meldCount[o] >= 3 ? 1 : 0);
+            if (weight == 0) continue;
+            if (riichi[o]) riichiCount++;
+            for (int x = 0; x < 34; x++) if (tc[x] > 0) botDanger[x] += weight * BotTileDanger(o, x);
+        }
+        return riichiCount;
+    }
+
+    /// Rough chance (0..14) that tile type x deals into seat o.
+    int BotTileDanger(int o, int x)
+    {
+        if (BotInPond(o, x)) return 0;
+        int seen = 4 - botUnseen[x];
+        if (x >= 27)
+        {
+            if (seen >= 3) return 1;
+            if (seen == 2) return 3;
+            return IsYakuhaiFor(o, x) ? 8 : 6;
+        }
+        int r = x % 9;
+        bool lowSuji = r >= 3 && BotInPond(o, x - 3);
+        bool highSuji = r <= 5 && BotInPond(o, x + 3);
+        int d;
+        if (r == 0) d = highSuji ? 2 : 6;
+        else if (r == 8) d = lowSuji ? 2 : 6;
+        else if (r == 1) d = highSuji ? 3 : 8;
+        else if (r == 7) d = lowSuji ? 3 : 8;
+        else if (r == 2) d = highSuji ? 4 : 9;
+        else if (r == 6) d = lowSuji ? 4 : 9;
+        else d = (lowSuji && highSuji) ? 4 : ((lowSuji || highSuji) ? 8 : 12);
+        if (seen >= 3) d -= 2;
+        for (int k = 0; k < 1 + kanCount; k++) if (rules.DoraFromIndicator(wall[122 + k] / 4) == x) d += 2;
+        return d < 1 ? 1 : d;
+    }
+
+    bool BotInPond(int o, int x)
+    {
+        for (int i = 0; i < discardCount[o]; i++)
+        {
+            int d = discards[o * DiscardSlots + i];
+            if (d >= 0 && d / 4 == x) return true;
+        }
+        return false;
+    }
+
+    /// Dora value lost by discarding a tile of type x (counting a red five only when it's the last copy).
+    int BotDoraValue(int s, int x)
     {
         int v = 0;
-        if (tc[x] >= 2) v += 6;
-        if (tc[x] >= 3) v += 4;
-        if (x < 27)
-        {
-            int r = x % 9;
-            if (r >= 1 && tc[x - 1] > 0) v += 3;
-            if (r <= 7 && tc[x + 1] > 0) v += 3;
-            if (r >= 2 && tc[x - 2] > 0) v += 1;
-            if (r <= 6 && tc[x + 2] > 0) v += 1;
-            if (r == 0 || r == 8) v -= 1;
-            else if (r >= 2 && r <= 6) v += 1;
-        }
-        else if (IsYakuhaiFor(s, x)) v += 2;
-        else v -= 1;
-        for (int d = 0; d < 1 + kanCount; d++) if (rules.DoraFromIndicator(wall[122 + d] / 4) == x) v += 2;
+        for (int d = 0; d < 1 + kanCount; d++) if (rules.DoraFromIndicator(wall[122 + d] / 4) == x) v++;
+        if (x < 27 && x % 9 == 4 && tc[x] == 1 && rules.IsAka(BotTileOfType(s, x))) v++;
         return v;
     }
 
-    /// Genbutsu: the tile type is already in a riichi player's discards, so it can't deal into them.
-    bool BotIsSafe(int s, int x)
+    /// With x removed from tc (tenpai), would the bot be furiten: a wait already in its pond, or x itself a wait?
+    bool BotFuritenAfter(int s, int x)
     {
-        for (int o = 0; o < 4; o++)
+        for (int t = 0; t < 34; t++)
         {
-            if (o == s || !riichi[o]) continue;
-            bool found = false;
-            for (int i = 0; i < discardCount[o]; i++)
-            {
-                int d = discards[o * DiscardSlots + i];
-                if (d >= 0 && d / 4 == x) { found = true; break; }
-            }
-            if (!found) return false;
+            if (!rules.IsWait(tc, meldCount[s], t)) continue;
+            if (t == x || BotInPond(s, t)) return true;
         }
-        return true;
+        return false;
     }
 
     bool IsYakuhaiFor(int s, int x)
@@ -1225,25 +1478,6 @@ public class MahjongGame : UdonSharpBehaviour
             if (k != MahjongRules.MeldChi && IsYakuhaiFor(s, melds[s * MeldSlots + m * 4] / 4)) return true;
         }
         return false;
-    }
-
-    /// Bots only call when the hand keeps a yaku (yakuhai), so they never end up stuck with no way to win.
-    void BotCall(int s)
-    {
-        int opts = callOptions[s];
-        if ((opts & OptRon) != 0) { DoRespond(s, RespRon, 0); return; }
-        int t = lastDiscard / 4;
-        bool hasYaku = BotHasYakuhaiMeld(s);
-        if ((opts & OptPon) != 0 && (IsYakuhaiFor(s, t) || hasYaku)) { DoRespond(s, RespPon, 0); return; }
-        if ((opts & OptChi) != 0 && hasYaku)
-        {
-            CountClosed(s, tc);
-            for (int st = t - 2; st <= t; st++)
-            {
-                if (ChiPossible(st, t)) { DoRespond(s, RespChi, st); return; }
-            }
-        }
-        DoRespond(s, RespPass, 0);
     }
 
     /// A tile id of type t from the bot's hand: the drawn tile if it matches, else a non-red copy.
@@ -1526,7 +1760,7 @@ public class MahjongGame : UdonSharpBehaviour
                 }
             }
             else if (phase == PhasePause) s += "\n" + SeatName((lastDiscarder + 1) % 4) + " draws next...";
-            else if (phase == PhaseHandOver) s += "\nHand over. Press Next Hand.";
+            else if (phase == PhaseHandOver) s += nextHandSeconds > 0f ? "\nNext hand in " + Seconds() + "s (or press Next Hand)." : "\nHand over. Press Next Hand.";
             else if (phase == PhaseGameOver) s += "\nPress Start for a new game.";
         }
         if (!string.IsNullOrEmpty(lastEvent)) s += "\n<size=80%>" + lastEvent + "</size>";
@@ -1550,9 +1784,14 @@ public class MahjongGame : UdonSharpBehaviour
     string CountdownText()
     {
         if (callWindowSeconds <= 0f) return "";
+        return " (" + Seconds() + "s)";
+    }
+
+    /// Whole seconds left on the running timer.
+    int Seconds()
+    {
         int ms = timerDeadline - Networking.GetServerTimeInMilliseconds();
-        int secs = ms <= 0 ? 0 : (ms + 999) / 1000;
-        return " (" + secs + "s)";
+        return ms <= 0 ? 0 : (ms + 999) / 1000;
     }
 
     string OptionText(int opts)
