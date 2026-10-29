@@ -7,13 +7,14 @@ A networked 4-player riichi mahjong table for VRChat worlds, written in UdonShar
 - Full riichi rules: chi, pon, kan, riichi, ron and tsumo, dora, ura dora and red fives, furiten, and yaku and fu scoring with limit hands.
 - Tiles you can claim light up, and a timed call window gives you time to decide before play moves on.
 - A large announcer above the table shows the last discard and calls such as PON!, RIICHI! and RON!.
-- Bots fill empty seats. If a player leaves mid-game, a bot takes over their seat.
+- **Bots:** they discard by shanten and tile acceptance, keep dora, red fives and honor pairs, and declare riichi on good waits while avoiding furiten. They only call when it speeds up a hand that keeps a yaku (yakuhai, tanyao or honitsu). Against riichi they push when close to ready and fold otherwise, using safe tiles, suji and visible honors. If a player leaves mid-game, a bot takes over their seat.
+- The next hand starts on its own after a short countdown, so bot games keep flowing. You can change the countdown or turn it off.
 - Material slots on the game object let you restyle the table, tiles, tile backs, tile faces and buttons.
 
 ## Requirements
 
 - Unity 2022.3 (the VRChat-supported version)
-- VRChat Worlds SDK 3.x
+- VRChat Worlds SDK 3.8 or newer (it uses networked events with parameters)
 - UdonSharp 1.x
 - TextMeshPro
 
@@ -21,7 +22,10 @@ A networked 4-player riichi mahjong table for VRChat worlds, written in UdonShar
 
 1. Copy the `Mahjong` folder (and `Mahjong.meta`) into your project's `Assets` folder.
 2. Run **Tools → Mahjong → Build Table**.
-3. Players click **Sit** to take a seat, or **Bot** to give a seat to a bot, and then start the game.
+3. Optional: select the table and run **Tools → Mahjong → Save Selected Table As Prefab**.
+4. In game, click **Sit** to take a seat or **Bot** to add a bot, then press **Start**.
+
+To restyle the table, drop materials into the slots on `MahjongGame` and run **Tools → Mahjong → Apply Materials**.
 
 ## Tile faces
 

@@ -559,6 +559,219 @@ public class MahjongRules : UdonSharpBehaviour
         return true;
     }
 
+    // ================= shanten (used by the bots) =================
+    // Shanten = tiles away from tenpai: 0 is tenpai, -1 is a complete hand.
+    // Suits never share sets, so each suit (and the honors) is searched on its own and the results combined.
+    // groupTable[g * 10 + pair * 5 + m] = most partial sets group g can form alongside m sets, -1 = impossible.
+
+    int[] groupTable = new int[40];
+    int[] spareTable = new int[10];
+    int[] gc = new int[9];
+    int scanLen;
+    bool scanHonor;
+    // Memo for Solve: slot (i * 5 + a) * 5 + b holds a 10-entry table like groupTable; slot 225 is the empty end.
+    int[] memoTab = new int[2260];
+    int[] memoStamp = new int[226];
+    int stamp = 0;
+    const int CacheSize = 509;
+    int[] cacheKeys = new int[509];
+    int[] cacheTabs = new int[5090];
+    int[] dpA = new int[10];
+    int[] dpB = new int[10];
+
+    /// Shanten of the closed counts c (13 or 14 tiles minus 3 per meld).
+    public int Shanten(int[] c, int meldCount)
+    {
+        for (int g = 0; g < 4; g++) BuildGroup(c, g, groupTable, g * 10);
+        return BestShanten(c, meldCount, -1);
+    }
+
+    /// Number of unseen tiles that would lower the shanten of c (a 13-tile style hand).
+    /// unseen[t] = copies of type t the bot hasn't seen. Leaves c unchanged.
+    public int Ukeire(int[] c, int meldCount, int[] unseen)
+    {
+        int baseShanten = Shanten(c, meldCount);
+        int total = 0;
+        for (int t = 0; t < 34; t++)
+        {
+            if (unseen[t] <= 0 || c[t] >= 4) continue;
+            // A tile that touches nothing can't form a set, so only seven pairs / thirteen orphans can change.
+            bool touches = Touches(c, t);
+            c[t]++;
+            int s;
+            if (touches)
+            {
+                BuildGroup(c, t / 9, spareTable, 0);
+                s = BestShanten(c, meldCount, t / 9);
+            }
+            else s = SpecialShanten(c, meldCount, StandardShanten(meldCount, -1));
+            c[t]--;
+            if (s < baseShanten) total += unseen[t];
+        }
+        return total;
+    }
+
+    int BestShanten(int[] c, int meldCount, int swapGroup)
+    {
+        return SpecialShanten(c, meldCount, StandardShanten(meldCount, swapGroup));
+    }
+
+    /// Takes the min of the standard shanten with seven pairs and thirteen orphans (closed hands only).
+    int SpecialShanten(int[] c, int meldCount, int best)
+    {
+        if (meldCount > 0) return best;
+        int pairs = 0, kinds = 0, orphanKinds = 0;
+        bool orphanPair = false;
+        for (int t = 0; t < 34; t++)
+        {
+            if (c[t] == 0) continue;
+            kinds++;
+            if (c[t] >= 2) pairs++;
+            if (IsTermOrHonor(t))
+            {
+                orphanKinds++;
+                if (c[t] >= 2) orphanPair = true;
+            }
+        }
+        int chiitoi = 6 - pairs + (kinds < 7 ? 7 - kinds : 0);
+        int kokushi = 13 - orphanKinds - (orphanPair ? 1 : 0);
+        if (chiitoi < best) best = chiitoi;
+        if (kokushi < best) best = kokushi;
+        return best;
+    }
+
+    /// Combines the group tables; group swapGroup (if >= 0) is read from spareTable instead.
+    int StandardShanten(int meldCount, int swapGroup)
+    {
+        for (int i = 0; i < 10; i++) dpA[i] = -1;
+        dpA[0] = 0;
+        for (int g = 0; g < 4; g++)
+        {
+            int[] tab = g == swapGroup ? spareTable : groupTable;
+            int off = g == swapGroup ? 0 : g * 10;
+            for (int i = 0; i < 10; i++) dpB[i] = -1;
+            for (int p1 = 0; p1 < 2; p1++)
+                for (int m1 = 0; m1 < 5; m1++)
+                {
+                    int a = dpA[p1 * 5 + m1];
+                    if (a < 0) continue;
+                    for (int p2 = 0; p2 + p1 < 2; p2++)
+                        for (int m2 = 0; m1 + m2 < 5; m2++)
+                        {
+                            int b = tab[off + p2 * 5 + m2];
+                            if (b < 0) continue;
+                            int k = (p1 + p2) * 5 + m1 + m2;
+                            if (a + b > dpB[k]) dpB[k] = a + b;
+                        }
+                }
+            for (int i = 0; i < 10; i++) dpA[i] = dpB[i];
+        }
+        int best = 8;
+        for (int p = 0; p < 2; p++)
+            for (int m = 0; m < 5; m++)
+            {
+                int partials = dpA[p * 5 + m];
+                if (partials < 0) continue;
+                int sets = m + meldCount;
+                if (sets > 4) continue;
+                if (partials > 4 - sets) partials = 4 - sets;
+                int s = 8 - 2 * sets - partials - p;
+                if (s < best) best = s;
+            }
+        return best;
+    }
+
+    void BuildGroup(int[] c, int g, int[] table, int offset)
+    {
+        scanHonor = g == 3;
+        scanLen = scanHonor ? 7 : 9;
+        // The three suits behave identically, so results are cached by tile counts (honors separately).
+        int key = scanHonor ? 1 : 2;
+        for (int i = 0; i < 9; i++)
+        {
+            gc[i] = i < scanLen ? c[g * 9 + i] : 0;
+            key = key * 5 + gc[i];
+        }
+        int slot = key % CacheSize;
+        if (cacheKeys[slot] == key)
+        {
+            for (int i = 0; i < 10; i++) table[offset + i] = cacheTabs[slot * 10 + i];
+            return;
+        }
+        stamp++;
+        int k = Solve(0, gc[0], gc[1]);
+        cacheKeys[slot] = key;
+        for (int i = 0; i < 10; i++)
+        {
+            table[offset + i] = memoTab[k * 10 + i];
+            cacheTabs[slot * 10 + i] = memoTab[k * 10 + i];
+        }
+    }
+
+    /// Best partial-set counts for tiles i.. of the group, where position i has a tiles left and i + 1 has b
+    /// (later positions are untouched). Each way of splitting position i's tiles into sequences, partial
+    /// sequences, a triplet, the pair, pair-shaped partials and leftovers is tried once. Returns the memo slot.
+    [RecursiveMethod]
+    int Solve(int i, int a, int b)
+    {
+        if (i >= scanLen)
+        {
+            if (memoStamp[225] != stamp)
+            {
+                for (int j = 0; j < 10; j++) memoTab[2250 + j] = -1;
+                memoTab[2250] = 0;
+                memoStamp[225] = stamp;
+            }
+            return 225;
+        }
+        int k = (i * 5 + a) * 5 + b;
+        if (memoStamp[k] == stamp) return k;
+        for (int j = 0; j < 10; j++) memoTab[k * 10 + j] = -1;
+
+        int c2 = i + 2 < scanLen ? gc[i + 2] : 0;
+        bool seq = !scanHonor;
+        int maxX = 0;
+        if (seq && i <= 6) { maxX = a < b ? a : b; if (c2 < maxX) maxX = c2; }
+        for (int x = 0; x <= maxX; x++)
+        {
+            int maxY = seq && i <= 7 ? (a < b ? a : b) - x : 0;
+            for (int y = 0; y <= maxY; y++)
+            {
+                int maxZ = 0;
+                if (seq && i <= 6) maxZ = (a - x - y < c2 - x) ? a - x - y : c2 - x;
+                for (int z = 0; z <= maxZ; z++)
+                {
+                    int child = Solve(i + 1, b - x - y, c2 - x - z);
+                    int r = a - x - y - z;
+                    for (int pon = 0; pon * 3 <= r; pon++)
+                        for (int head = 0; head <= 1 && pon * 3 + head * 2 <= r; head++)
+                            for (int pairs = 0; pon * 3 + head * 2 + pairs * 2 <= r; pairs++)
+                                Merge(k, child, head, x + pon, y + z + pairs);
+                }
+            }
+        }
+        memoStamp[k] = stamp;
+        return k;
+    }
+
+    void Merge(int k, int child, int head, int addSets, int addPartials)
+    {
+        for (int pc = 0; pc + head < 2; pc++)
+        {
+            for (int mc = 0; mc < 5; mc++)
+            {
+                int v = memoTab[child * 10 + pc * 5 + mc];
+                if (v < 0) continue;
+                int m = mc + addSets;
+                if (m > 4) m = 4;
+                int t = v + addPartials;
+                if (t > 4) t = 4;
+                int idx = k * 10 + (pc + head) * 5 + m;
+                if (t > memoTab[idx]) memoTab[idx] = t;
+            }
+        }
+    }
+
     // ================= helpers =================
 
     public int BasePoints(int han, int fu)
