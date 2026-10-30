@@ -16,6 +16,9 @@ public class MahjongTile : UdonSharpBehaviour
     public TMP_Text label;      // text fallback when there is no face quad
     public Renderer body;
     public Renderer face;       // quad on the front of the tile showing the atlas picture
+    public TMP_Text numberLabel; // small number / wind in the corner of the picture
+    [Tooltip("Show the number (or wind) in the corner of the tile picture. The game's setting overrides this.")]
+    public bool showNumber = true;
 
     [Header("Materials (the game's material slots override these)")]
     public Material bodyMaterial;
@@ -52,6 +55,7 @@ public class MahjongTile : UdonSharpBehaviour
     {
         SetVisible(false);
         if (face != null) face.enabled = false;
+        if (numberLabel != null) numberLabel.enabled = false;
     }
 
     /// tint: 0 normal, 1 selected / latest discard, 2 dimmed, 3 call / riichi / kan opportunity,
@@ -74,6 +78,11 @@ public class MahjongTile : UdonSharpBehaviour
             if (label != null) label.enabled = false;
             UseMaterial(face, faceArtMaterial);
             ShowAtlasCell(AtlasCell(id), c);
+            if (numberLabel != null)
+            {
+                numberLabel.enabled = showNumber;
+                numberLabel.text = CornerText(id);
+            }
         }
         else if (label != null) label.text = FaceText(id);
 
@@ -84,6 +93,7 @@ public class MahjongTile : UdonSharpBehaviour
     {
         SetVisible(true);
         if (face != null) face.enabled = false;
+        if (numberLabel != null) numberLabel.enabled = false;
         if (label != null) label.text = "";
         if (backMaterial != null)
         {
@@ -167,6 +177,27 @@ public class MahjongTile : UdonSharpBehaviour
         if (label != null) label.enabled = visible && face == null;
         Collider col = GetComponent<Collider>();
         if (col != null) col.enabled = visible && !displayOnly;
+    }
+
+    /// Corner badge: the number in its suit colour (red fives in red), or the wind / dragon letter.
+    string CornerText(int id)
+    {
+        int t = id / 4;
+        if (t < 27)
+        {
+            int n = t % 9 + 1;
+            int suit = t / 9;
+            string col = (id == 16 || id == 52 || id == 88) ? "#e01010" : (suit == 0 ? "#9a1010" : (suit == 1 ? "#10309a" : "#0d6a24"));
+            string letter = suit == 0 ? "m" : (suit == 1 ? "p" : "s");
+            return "<color=" + col + ">" + n + "<size=60%>" + letter + "</size></color>";
+        }
+        if (t == 27) return "E";
+        if (t == 28) return "S";
+        if (t == 29) return "W";
+        if (t == 30) return "N";
+        if (t == 31) return "<color=#5070b0>Wh</color>";
+        if (t == 32) return "<color=#0d6a24>Gr</color>";
+        return "<color=#e01010>Rd</color>";
     }
 
     string FaceText(int id)

@@ -5,6 +5,7 @@ A networked 4-player riichi mahjong table for VRChat worlds, written in UdonShar
 ## Features
 
 - Full riichi rules: chi, pon, kan, riichi, ron and tsumo, dora, ura dora and red fives, furiten, and yaku and fu scoring with limit hands.
+- Each tile shows its number (or wind) in the corner of the picture. Turn it off with `showTileNumbers`.
 - Tiles you can claim light up, and a timed call window gives you time to decide before play moves on.
 - A large announcer above the table shows the last discard and calls such as PON!, RIICHI! and RON!.
 - **Bots:** they discard by shanten and tile acceptance, keep dora, red fives and honor pairs, and declare riichi on good waits while avoiding furiten. They only call when it speeds up a hand that keeps a yaku (yakuhai, tanyao or honitsu). Against riichi they push when close to ready and fold otherwise, using safe tiles, suji and visible honors. If a player leaves mid-game, a bot takes over their seat.
