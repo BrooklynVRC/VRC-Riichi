@@ -41,6 +41,11 @@ public class MahjongGame : UdonSharpBehaviour
     public Material sitButtonMaterial;
     [Tooltip("Show the number (or wind) in the corner of every tile picture.")]
     public bool showTileNumbers = true;
+    [Tooltip("Dora tiles (and red fives) glow with a slow pulse. Needs a material with emission, like the built-in ones.")]
+    public bool showDoraShine = true;
+    public Color doraShineColor = new Color(1f, 0.75f, 0.2f);
+    [Tooltip("Pulses per second, roughly.")]
+    public float doraShineSpeed = 0.6f;
 
     [Header("Rules")]
     [Tooltip("1 = East round only (tonpuusen), 2 = East + South (hanchan).")]
@@ -178,6 +183,8 @@ public class MahjongGame : UdonSharpBehaviour
     int discardHintTint = 0;
     int[] displayIds = new int[56];
     int[] slotCode = new int[28];
+    MahjongTile[] shineList = new MahjongTile[64];
+    int shineCount = 0;
     int[] slotArg = new int[28];
     int slotFill = 0;
     int[] tc = new int[34];
@@ -235,6 +242,12 @@ public class MahjongGame : UdonSharpBehaviour
         {
             nextCountdownRefresh = Time.time + 0.25f;
             statusText.text = BuildStatus();
+        }
+        if (shineCount > 0)
+        {
+            float pulse = Mathf.Sin(Time.time * doraShineSpeed * 6.2832f) * 0.5f + 0.5f;
+            Color c = doraShineColor * (0.2f + 0.8f * pulse);
+            for (int i = 0; i < shineCount; i++) if (shineList[i] != null) shineList[i].SetShine(c);
         }
         if (announceText != null && announceHideTime > 0f && Time.time >= announceHideTime)
         {
@@ -1570,7 +1583,38 @@ public class MahjongGame : UdonSharpBehaviour
 
         RefreshAnnouncer();
         UpdateButtons();
+        RebuildShineList();
         if (statusText != null) statusText.text = BuildStatus();
+    }
+
+    // ================= dora shine =================
+
+    /// True if a face-up tile with this id is worth dora right now (a red five, or matches a revealed indicator).
+    public bool IsDoraId(int id)
+    {
+        if (!showDoraShine || id < 0 || rules == null) return false;
+        if (rules.IsAka(id)) return true;
+        if (phase == PhaseLobby) return false;
+        int t = id / 4;
+        for (int d = 0; d < 1 + kanCount; d++) if (rules.DoraFromIndicator(wall[122 + d] / 4) == t) return true;
+        return false;
+    }
+
+    /// Collects the tiles currently showing a dora face so Update only pulses those.
+    void RebuildShineList()
+    {
+        shineCount = 0;
+        AddShining(handTiles);
+        AddShining(discardTiles);
+        AddShining(meldTiles);
+        if (announceTile != null && announceTile.shining && shineCount < shineList.Length) shineList[shineCount++] = announceTile;
+    }
+
+    void AddShining(MahjongTile[] tiles)
+    {
+        if (tiles == null) return;
+        for (int i = 0; i < tiles.Length && shineCount < shineList.Length; i++)
+            if (tiles[i] != null && tiles[i].shining) shineList[shineCount++] = tiles[i];
     }
 
     // ================= context buttons =================
