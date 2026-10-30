@@ -13,10 +13,12 @@ public static class MahjongTableBuilder
     static readonly string[] Actions = { "ActRiichi", "ActTsumo", "ActRon", "ActPon", "ActChi", "ActKan", "ActPass", "ActStart", "ActNextHand", "ActReset" };
 
     const float TableY = 0.775f; // top surface height
-    static readonly Vector3 TileSize = new Vector3(0.05f, 0.07f, 0.035f);
-    const float Pitch = 0.054f;   // tile spacing
-    const float RowPitch = 0.076f; // spacing between rows of flat tiles
-    const float TableHalf = 1.2f;
+    // Layout scale: tiles, spacing and the table all grow together, so nothing overlaps.
+    const float S = 1.25f;
+    static readonly Vector3 TileSize = new Vector3(0.05f, 0.07f, 0.035f) * S;
+    const float Pitch = 0.054f * S;   // tile spacing
+    const float RowPitch = 0.076f * S; // spacing between rows of flat tiles
+    const float TableHalf = 1.2f * S;
     const string MaterialFolder = "Assets/Mahjong/Materials";
     const string AtlasPath = "Assets/Mahjong/Textures/MahjongTileAtlas.png";
 
@@ -43,7 +45,7 @@ public static class MahjongTableBuilder
 
         // Table
         var top = Prim(PrimitiveType.Cube, "TableTop", root.transform, new Vector3(0, 0.75f, 0), Quaternion.identity, new Vector3(TableHalf * 2f, 0.05f, TableHalf * 2f));
-        var leg = Prim(PrimitiveType.Cylinder, "Leg", root.transform, new Vector3(0, 0.36f, 0), Quaternion.identity, new Vector3(0.25f, 0.36f, 0.25f));
+        var leg = Prim(PrimitiveType.Cylinder, "Leg", root.transform, new Vector3(0, 0.36f, 0), Quaternion.identity, new Vector3(0.3f, 0.36f, 0.3f));
         var tableRenderers = new[] { top.GetComponent<Renderer>(), leg.GetComponent<Renderer>() };
         foreach (var r in tableRenderers) r.sharedMaterial = tableMat;
 
@@ -82,45 +84,45 @@ public static class MahjongTableBuilder
             anchor.SetParent(root.transform, false);
             anchor.localRotation = Quaternion.Euler(0, -90 * s, 0);
 
-            var seatGo = ButtonObject("SitButton", anchor, new Vector3(0.58f, TableY + 0.012f, -1.1f), sitButtonMat, sitButtonRenderers, "Sit");
+            var seatGo = ButtonObject("SitButton", anchor, new Vector3(0.58f * S, TableY + 0.012f, -1.1f * S), sitButtonMat, sitButtonRenderers, "Sit");
             var seat = UdonSharpUndo.AddComponent<MahjongSeat>(seatGo);
             seat.game = game; seat.seatIndex = s;
             EditorUtility.SetDirty(seat);
 
-            var botGo = ButtonObject("BotButton", anchor, new Vector3(0.68f, TableY + 0.012f, -1.1f), buttonMat, buttonRenderers, "Bot");
+            var botGo = ButtonObject("BotButton", anchor, new Vector3(0.68f * S, TableY + 0.012f, -1.1f * S), buttonMat, buttonRenderers, "Bot");
             var bot = UdonSharpUndo.AddComponent<MahjongSeat>(botGo);
             bot.game = game; bot.seatIndex = s; bot.botButton = true;
             EditorUtility.SetDirty(bot);
 
             // Name tag above and behind the player, facing the table: readable by the others, out of the player's own view.
-            seatLabels[s] = Text("SeatLabel", anchor, new Vector3(0, TableY + 1.3f, -1.75f), Quaternion.Euler(0, 180, 0), 1.0f, new Vector2(1.4f, 0.35f), Color.white, false);
+            seatLabels[s] = Text("SeatLabel", anchor, new Vector3(0, TableY + 1.3f, -1.75f * S), Quaternion.Euler(0, 180, 0), 1.0f, new Vector2(1.4f, 0.35f), Color.white, false);
 
             // Hand: 13 tiles plus the drawn tile set slightly apart
             for (int k = 0; k < 14; k++)
             {
-                float x = -0.38f + k * Pitch + (k == 13 ? 0.025f : 0f);
-                var pos = new Vector3(x, TableY + TileSize.y * 0.5f, -0.95f);
+                float x = -0.38f * S + k * Pitch + (k == 13 ? 0.025f * S : 0f);
+                var pos = new Vector3(x, TableY + TileSize.y * 0.5f, -0.95f * S);
                 handTiles[s * 14 + k] = Tile("Hand" + k, anchor, pos, Quaternion.Euler(15, 0, 0), game, s, k, false);
             }
 
             // Discards: 6 per row toward the center
             for (int k = 0; k < 24; k++)
             {
-                var pos = new Vector3(-2.5f * Pitch + (k % 6) * Pitch, flatY, -0.33f - (k / 6) * RowPitch);
+                var pos = new Vector3(-2.5f * Pitch + (k % 6) * Pitch, flatY, -0.33f * S - (k / 6) * RowPitch);
                 discardTiles[s * 24 + k] = Tile("Discard" + k, anchor, pos, flat, game, s, k, true);
             }
 
             // Melds: two melds per row on the player's right
             for (int k = 0; k < 16; k++)
             {
-                var pos = new Vector3(0.47f + (k % 8) * Pitch, flatY, -0.78f - (k / 8) * (RowPitch + 0.002f));
+                var pos = new Vector3(0.47f * S + (k % 8) * Pitch, flatY, -0.78f * S - (k / 8) * (RowPitch + 0.002f));
                 meldTiles[s * 16 + k] = Tile("Meld" + k, anchor, pos, flat, game, s, k, true);
             }
 
             // Action buttons
             for (int b = 0; b < Labels.Length; b++)
             {
-                var pos = new Vector3(-0.5f + b * 0.1f, TableY + 0.012f, -1.1f);
+                var pos = new Vector3((-0.5f + b * 0.1f) * S, TableY + 0.012f, -1.1f * S);
                 var go = ButtonObject("Btn_" + Labels[b], anchor, pos, buttonMat, buttonRenderers, Labels[b]);
                 var btn = UdonSharpUndo.AddComponent<MahjongButton>(go);
                 btn.game = game; btn.action = Actions[b]; btn.label = Labels[b];
@@ -132,7 +134,7 @@ public static class MahjongTableBuilder
         var doraTiles = new MahjongTile[5];
         for (int d = 0; d < 5; d++)
             doraTiles[d] = Tile("Dora" + d, root.transform, new Vector3(-2 * Pitch + d * Pitch, flatY, 0), flat, game, 0, d, true);
-        Text("DoraLabel", root.transform, new Vector3(0, TableY + 0.002f, -0.08f), flat, 0.35f, new Vector2(0.4f, 0.06f), Color.white, false).text = "DORA";
+        Text("DoraLabel", root.transform, new Vector3(0, TableY + 0.002f, -0.08f * S), flat, 0.35f * S, new Vector2(0.4f, 0.06f), Color.white, false).text = "DORA";
 
         game.rules = rules;
         game.statusText = status;
@@ -336,7 +338,7 @@ public static class MahjongTableBuilder
         Object.DestroyImmediate(body.GetComponent<Collider>());
         body.GetComponent<Renderer>().sharedMaterial = tileMat;
 
-        var label = Text("Label", go.transform, new Vector3(0, 0, -TileSize.z * 0.5f - 0.0006f), Quaternion.identity, 0.28f, new Vector2(TileSize.x, TileSize.y), Color.black, false);
+        var label = Text("Label", go.transform, new Vector3(0, 0, -TileSize.z * 0.5f - 0.0006f), Quaternion.identity, 0.28f * S, new Vector2(TileSize.x, TileSize.y), Color.black, false);
         label.text = "";
 
         // Picture quad on the front face (a Quad's visible side faces -Z, toward the tile's owner).
@@ -347,7 +349,7 @@ public static class MahjongTableBuilder
         faceRenderer.enabled = false; // the game turns it on with the right atlas cell
 
         // Number badge in the top-left corner of the picture, just in front of it.
-        var number = Text("Number", go.transform, new Vector3(-TileSize.x * 0.2f, TileSize.y * 0.33f, -TileSize.z * 0.5f - 0.001f), Quaternion.identity, 0.2f, new Vector2(TileSize.x * 0.5f, TileSize.y * 0.3f), Color.black, false);
+        var number = Text("Number", go.transform, new Vector3(-TileSize.x * 0.2f, TileSize.y * 0.33f, -TileSize.z * 0.5f - 0.001f), Quaternion.identity, 0.2f * S, new Vector2(TileSize.x * 0.5f, TileSize.y * 0.3f), Color.black, false);
         number.alignment = TextAlignmentOptions.TopLeft;
         number.fontStyle = FontStyles.Bold;
         number.text = "";
