@@ -346,11 +346,19 @@ public static class MahjongTableBuilder
         faceRenderer.sharedMaterial = tileFaceMat;
         faceRenderer.enabled = false; // the game turns it on with the right atlas cell
 
+        // Number badge in the top-left corner of the picture, just in front of it.
+        var number = Text("Number", go.transform, new Vector3(-TileSize.x * 0.2f, TileSize.y * 0.33f, -TileSize.z * 0.5f - 0.001f), Quaternion.identity, 0.2f, new Vector2(TileSize.x * 0.5f, TileSize.y * 0.3f), Color.black, false);
+        number.alignment = TextAlignmentOptions.TopLeft;
+        number.fontStyle = FontStyles.Bold;
+        number.text = "";
+        number.enabled = false;
+
         var tile = UdonSharpUndo.AddComponent<MahjongTile>(go);
         tile.game = game; tile.seat = seat; tile.slot = slot; tile.displayOnly = displayOnly;
         tile.label = label;
         tile.body = body.GetComponent<Renderer>();
         tile.face = faceRenderer;
+        tile.numberLabel = number;
         tile.bodyMaterial = tileMat;
         tile.backMaterial = tileBackMat;
         tile.faceArtMaterial = tileFaceMat;

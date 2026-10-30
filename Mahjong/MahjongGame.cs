@@ -38,6 +38,8 @@ public class MahjongGame : UdonSharpBehaviour
     public Material tileFaceMaterial;
     public Material buttonMaterial;
     public Material sitButtonMaterial;
+    [Tooltip("Show the number (or wind) in the corner of every tile picture.")]
+    public bool showTileNumbers = true;
 
     [Header("Rules")]
     [Tooltip("1 = East round only (tonpuusen), 2 = East + South (hanchan).")]
@@ -180,6 +182,11 @@ public class MahjongGame : UdonSharpBehaviour
         ApplyTileMaterials(discardTiles);
         ApplyTileMaterials(meldTiles);
         ApplyTileMaterials(doraTiles);
+        if (announceTile != null)
+        {
+            announceTile.SetMaterials(tileMaterial, tileBackMaterial, tileFaceMaterial);
+            announceTile.showNumber = showTileNumbers;
+        }
         ApplyRendererMaterial(tableRenderers, tableMaterial);
         ApplyRendererMaterial(buttonRenderers, buttonMaterial);
         ApplyRendererMaterial(sitButtonRenderers, sitButtonMaterial);
@@ -188,7 +195,12 @@ public class MahjongGame : UdonSharpBehaviour
     void ApplyTileMaterials(MahjongTile[] tiles)
     {
         if (tiles == null) return;
-        for (int i = 0; i < tiles.Length; i++) if (tiles[i] != null) tiles[i].SetMaterials(tileMaterial, tileBackMaterial, tileFaceMaterial);
+        for (int i = 0; i < tiles.Length; i++)
+        {
+            if (tiles[i] == null) continue;
+            tiles[i].SetMaterials(tileMaterial, tileBackMaterial, tileFaceMaterial);
+            tiles[i].showNumber = showTileNumbers;
+        }
     }
 
     void ApplyRendererMaterial(Renderer[] renderers, Material m)
