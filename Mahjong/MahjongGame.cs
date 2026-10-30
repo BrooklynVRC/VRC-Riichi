@@ -25,6 +25,7 @@ public class MahjongGame : UdonSharpBehaviour
     public MahjongTile announceTile;
     public TMP_Text announceText;
     public TMP_Text announceCaption;
+    public MahjongButton[] actionButtons; // 4 seats x ButtonSlots context buttons
     public Renderer[] tableRenderers;
     public Renderer[] buttonRenderers;
     public Renderer[] sitButtonRenderers;
@@ -89,6 +90,21 @@ public class MahjongGame : UdonSharpBehaviour
     const int ActBotToggle = 13;
 
     const int BotSeat = -2;       // seatPlayers value for a bot-controlled seat
+
+    // Context buttons: each seat has ButtonSlots buttons that show only the choices available right now.
+    public const int ButtonSlots = 7;
+    const int BtnNone = 0;
+    const int BtnTsumo = 1;
+    const int BtnRiichi = 2;
+    const int BtnOwnKan = 3;      // arg: tile type
+    const int BtnRon = 4;
+    const int BtnPon = 5;
+    const int BtnChi = 6;         // arg: first tile type of the sequence
+    const int BtnCallKan = 7;
+    const int BtnPass = 8;
+    const int BtnStart = 9;
+    const int BtnNext = 10;
+    const int BtnReset = 11;
 
     const int OptRon = 1;
     const int OptPon = 2;
@@ -161,6 +177,9 @@ public class MahjongGame : UdonSharpBehaviour
     bool[] hintCall = new bool[34];
     int discardHintTint = 0;
     int[] displayIds = new int[56];
+    int[] slotCode = new int[28];
+    int[] slotArg = new int[28];
+    int slotFill = 0;
     int[] tc = new int[34];
     bool[] waitMask = new bool[34];
     string[] windNames = { "East", "South", "West", "North" };
@@ -1550,7 +1569,113 @@ public class MahjongGame : UdonSharpBehaviour
         }
 
         RefreshAnnouncer();
+        UpdateButtons();
         if (statusText != null) statusText.text = BuildStatus();
+    }
+
+    // ================= context buttons =================
+
+    /// Called by a context button. Runs whatever that slot is showing for the local player.
+    public void OnActionButton(int seat, int slot)
+    {
+        if (seat < 0 || seat > 3 || slot < 0 || slot >= ButtonSlots || !ControlsSeat(seat)) return;
+        int code = slotCode[seat * ButtonSlots + slot];
+        int arg = slotArg[seat * ButtonSlots + slot];
+        if (code == BtnTsumo) ActTsumo();
+        else if (code == BtnRiichi) ActRiichi();
+        else if (code == BtnOwnKan) { if (TurnSeat() >= 0) Send(turn, ActOwnKan, arg); }
+        else if (code == BtnRon) Send(seat, ActRonWin, 0);
+        else if (code == BtnPon) Send(seat, ActPonCall, 0);
+        else if (code == BtnChi) Send(seat, ActChiCall, arg);
+        else if (code == BtnCallKan) Send(seat, ActKanCall, 0);
+        else if (code == BtnPass) Send(seat, ActPassCall, 0);
+        else if (code == BtnStart) ActStart();
+        else if (code == BtnNext) ActNextHand();
+        else if (code == BtnReset) ActReset();
+    }
+
+    void UpdateButtons()
+    {
+        if (actionButtons == null) return;
+        for (int s = 0; s < 4; s++)
+        {
+            slotFill = 0;
+            if (ControlsSeat(s)) AddSeatButtons(s);
+            for (int k = slotFill; k < ButtonSlots; k++) SetSlot(s, k, BtnNone, 0, "");
+        }
+    }
+
+    void AddSeatButtons(int s)
+    {
+        if (phase == PhaseLobby) { AddButton(s, BtnStart, 0, "Start"); return; }
+        if (phase == PhaseGameOver) { AddButton(s, BtnStart, 0, "New Game"); return; }
+        if (phase == PhaseHandOver)
+        {
+            AddButton(s, BtnNext, 0, "Next Hand");
+            AddButton(s, BtnReset, 0, "Reset");
+            return;
+        }
+        if (phase == PhaseTurn && s == turn)
+        {
+            if (hintTsumo) AddButton(s, BtnTsumo, 0, "Tsumo");
+            if (AnyHint(hintRiichi)) AddButton(s, BtnRiichi, 0, riichiArmed ? "Cancel Riichi" : "Riichi");
+            for (int t = 0; t < 34; t++) if (hintKan[t]) AddButton(s, BtnOwnKan, t, "Kan " + TypeName(t));
+            return;
+        }
+        if (phase == PhaseCalls && callResponse[s] == RespPending)
+        {
+            int opts = callOptions[s];
+            if ((opts & OptRon) != 0) AddButton(s, BtnRon, 0, "Ron");
+            if ((opts & OptPon) != 0) AddButton(s, BtnPon, 0, "Pon");
+            if ((opts & OptKan) != 0) AddButton(s, BtnCallKan, 0, "Kan");
+            if ((opts & OptChi) != 0)
+            {
+                // One button per way to chi, so you pick the sequence directly.
+                CountClosed(s, tc);
+                int t = lastDiscard / 4;
+                for (int st = t - 2; st <= t; st++) if (ChiPossible(st, t)) AddButton(s, BtnChi, st, "Chi " + SequenceName(st));
+            }
+            AddButton(s, BtnPass, 0, "Pass");
+        }
+    }
+
+    void AddButton(int s, int code, int arg, string text)
+    {
+        if (slotFill >= ButtonSlots) return;
+        SetSlot(s, slotFill, code, arg, text);
+        slotFill++;
+    }
+
+    void SetSlot(int s, int k, int code, int arg, string text)
+    {
+        int i = s * ButtonSlots + k;
+        slotCode[i] = code;
+        slotArg[i] = arg;
+        if (i < actionButtons.Length && actionButtons[i] != null) actionButtons[i].Show(text);
+    }
+
+    string TypeName(int t)
+    {
+        if (t < 27) return (t % 9 + 1) + SuitLetter(t);
+        if (t == 27) return "East";
+        if (t == 28) return "South";
+        if (t == 29) return "West";
+        if (t == 30) return "North";
+        if (t == 31) return "White";
+        if (t == 32) return "Green";
+        return "Red";
+    }
+
+    string SequenceName(int st)
+    {
+        int n = st % 9 + 1;
+        return n + "-" + (n + 1) + "-" + (n + 2) + SuitLetter(st);
+    }
+
+    string SuitLetter(int t)
+    {
+        int suit = t / 9;
+        return suit == 0 ? "m" : (suit == 1 ? "p" : "s");
     }
 
     /// Owner: queue a big announcement that every client shows for announceSeconds.
