@@ -26,6 +26,7 @@ public class MahjongGame : UdonSharpBehaviour
     public TMP_Text announceText;
     public TMP_Text announceCaption;
     public MahjongButton[] actionButtons; // 4 seats x ButtonSlots context buttons
+    public Transform[] pondAnchors;       // each seat's discard pond (centre), turned toward the viewer locally
     public Renderer[] tableRenderers;
     public Renderer[] buttonRenderers;
     public Renderer[] sitButtonRenderers;
@@ -46,6 +47,14 @@ public class MahjongGame : UdonSharpBehaviour
     public Color doraShineColor = new Color(1f, 0.75f, 0.2f);
     [Tooltip("Pulses per second, roughly.")]
     public float doraShineSpeed = 0.6f;
+
+    [Header("Readable discards")]
+    [Tooltip("On your screen, other players' discards turn to face you and tilt up so they're easy to read.")]
+    public bool faceOtherPonds = true;
+    [Tooltip("How far other players' ponds tilt up toward you, in degrees.")]
+    public float pondTilt = 40f;
+    [Tooltip("Size of other players' ponds on your screen.")]
+    public float pondScale = 1.15f;
 
     [Header("Rules")]
     [Tooltip("1 = East round only (tonpuusen), 2 = East + South (hanchan).")]
@@ -184,6 +193,9 @@ public class MahjongGame : UdonSharpBehaviour
     int[] displayIds = new int[56];
     int[] slotCode = new int[28];
     MahjongTile[] shineList = new MahjongTile[64];
+    Vector3[] pondHome = new Vector3[4];
+    Quaternion[] pondHomeRot = new Quaternion[4];
+    bool pondHomeSaved = false;
     int shineCount = 0;
     int[] slotArg = new int[28];
     int slotFill = 0;
@@ -243,6 +255,7 @@ public class MahjongGame : UdonSharpBehaviour
             nextCountdownRefresh = Time.time + 0.25f;
             statusText.text = BuildStatus();
         }
+        UpdatePonds();
         if (shineCount > 0)
         {
             float pulse = Mathf.Sin(Time.time * doraShineSpeed * 6.2832f) * 0.5f + 0.5f;
@@ -1585,6 +1598,64 @@ public class MahjongGame : UdonSharpBehaviour
         UpdateButtons();
         RebuildShineList();
         if (statusText != null) statusText.text = BuildStatus();
+    }
+
+    // ================= readable ponds =================
+
+    /// Local only: each other player's pond turns so its tiles read upright for this viewer and tilts up
+    /// like a display stand. The local player's own pond stays flat in front of them.
+    void UpdatePonds()
+    {
+        if (pondAnchors == null || pondAnchors.Length < 4) return;
+        if (!pondHomeSaved)
+        {
+            for (int s = 0; s < 4; s++)
+            {
+                if (pondAnchors[s] == null) continue;
+                pondHome[s] = pondAnchors[s].localPosition;
+                pondHomeRot[s] = pondAnchors[s].localRotation;
+            }
+            pondHomeSaved = true;
+        }
+
+        int me = LocalSeat();
+        Vector3 viewer;
+        if (me >= 0 && pondAnchors[me] != null)
+        {
+            // Seated: look from about where that seat's player sits, so the ponds hold still.
+            Vector3 centre = transform.position;
+            Vector3 home = pondAnchors[me].parent.TransformPoint(pondHome[me]);
+            Vector3 out1 = home - centre;
+            out1.y = 0f;
+            viewer = centre + out1 * 2.6f;
+        }
+        else
+        {
+            VRCPlayerApi local = Networking.LocalPlayer;
+            if (!Utilities.IsValid(local)) return;
+            viewer = local.GetTrackingData(VRCPlayerApi.TrackingDataType.Head).position;
+        }
+
+        for (int s = 0; s < 4; s++)
+        {
+            Transform p = pondAnchors[s];
+            if (p == null) continue;
+            if (!faceOtherPonds || s == me)
+            {
+                p.localPosition = pondHome[s];
+                p.localRotation = pondHomeRot[s];
+                p.localScale = Vector3.one;
+                continue;
+            }
+            Vector3 homeWorld = p.parent.TransformPoint(pondHome[s]);
+            Vector3 d = viewer - homeWorld;
+            d.y = 0f;
+            if (d.sqrMagnitude < 0.0001f) continue;
+            // Pond +Z (the top of each tile) points away from the viewer, then the far edge tilts up.
+            p.rotation = Quaternion.LookRotation(-d) * Quaternion.Euler(-pondTilt, 0f, 0f);
+            p.position = homeWorld + Vector3.up * (0.2f * pondScale * Mathf.Sin(pondTilt * Mathf.Deg2Rad) + 0.01f);
+            p.localScale = Vector3.one * pondScale;
+        }
     }
 
     // ================= dora shine =================
