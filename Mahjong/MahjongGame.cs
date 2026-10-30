@@ -27,6 +27,8 @@ public class MahjongGame : UdonSharpBehaviour
     public TMP_Text announceCaption;
     public MahjongButton[] actionButtons; // 4 seats x ButtonSlots context buttons
     public Transform[] pondAnchors;       // each seat's discard pond (centre), turned toward the viewer locally
+    public Transform doraAnchor;          // dora indicators + label, turned toward the viewer locally
+    public Transform[] meldAnchors;       // each seat's called sets, turned toward the viewer locally
     public Renderer[] tableRenderers;
     public Renderer[] buttonRenderers;
     public Renderer[] sitButtonRenderers;
@@ -55,6 +57,14 @@ public class MahjongGame : UdonSharpBehaviour
     public float pondTilt = 40f;
     [Tooltip("Size of other players' ponds on your screen.")]
     public float pondScale = 1.15f;
+    [Tooltip("Other players' called sets (pon / chi / kan) turn and tilt toward you the same way.")]
+    public bool faceOtherMelds = true;
+    public float meldTilt = 40f;
+    public float meldScale = 1.1f;
+    [Tooltip("The dora indicators turn and tilt toward you the same way.")]
+    public bool faceDoraIndicators = true;
+    public float doraTilt = 40f;
+    public float doraScale = 1.1f;
 
     [Header("Rules")]
     [Tooltip("1 = East round only (tonpuusen), 2 = East + South (hanchan).")]
@@ -177,6 +187,7 @@ public class MahjongGame : UdonSharpBehaviour
 
     // ---- local only ----
     bool riichiArmed = false;
+    bool receivedState = false;
     int shownAnnounceSerial = 0;
     float announceHideTime = 0f;
     bool botStepQueued = false;   // owner only
@@ -196,6 +207,10 @@ public class MahjongGame : UdonSharpBehaviour
     Vector3[] pondHome = new Vector3[4];
     Quaternion[] pondHomeRot = new Quaternion[4];
     bool pondHomeSaved = false;
+    Vector3 doraHome;
+    Vector3[] meldHome = new Vector3[4];
+    Quaternion[] meldHomeRot = new Quaternion[4];
+    Quaternion doraHomeRot;
     int shineCount = 0;
     int[] slotArg = new int[28];
     int slotFill = 0;
@@ -284,7 +299,35 @@ public class MahjongGame : UdonSharpBehaviour
 
     public override void OnDeserialization()
     {
+        if (!receivedState)
+        {
+            // A late joiner's first state shouldn't replay an old call announcement.
+            receivedState = true;
+            shownAnnounceSerial = announceSerial;
+        }
         Refresh();
+    }
+
+    /// Owner: seats whose player is no longer in the instance go to a bot (mid-game) or open up. Covers a player
+    /// who left while ownership was moving, when no owner was around to handle OnPlayerLeft.
+    void ReleaseMissingPlayers()
+    {
+        bool changed = false;
+        for (int s = 0; s < 4; s++)
+        {
+            if (seatPlayers[s] < 0) continue;
+            if (Utilities.IsValid(VRCPlayerApi.GetPlayerById(seatPlayers[s]))) continue;
+            seatPlayers[s] = IsRunning() ? BotSeat : -1;
+            changed = true;
+        }
+        if (!changed) return;
+        lastEvent = IsRunning() ? "A player left. A bot took over their seat." : "A player left.";
+        Commit();
+    }
+
+    public override void OnPlayerJoined(VRCPlayerApi player)
+    {
+        Refresh(); // seat names come from the player list
     }
 
     public override void OnPlayerLeft(VRCPlayerApi player)
@@ -656,6 +699,7 @@ public class MahjongGame : UdonSharpBehaviour
         // A new owner picks up any running timer and the bots.
         if (!Networking.IsOwner(gameObject)) return;
         botStepQueued = false;
+        ReleaseMissingPlayers();
         ScheduleBots();
         bool timed = phase == PhasePause || (phase == PhaseCalls && callWindowSeconds > 0f) || (phase == PhaseHandOver && nextHandSeconds > 0f);
         if (!timed) return;
@@ -1600,20 +1644,22 @@ public class MahjongGame : UdonSharpBehaviour
         if (statusText != null) statusText.text = BuildStatus();
     }
 
-    // ================= readable ponds =================
+    // ================= readable ponds, melds and dora =================
 
-    /// Local only: each other player's pond turns so its tiles read upright for this viewer and tilts up
-    /// like a display stand. The local player's own pond stays flat in front of them.
+    /// Local only: other players' ponds and called sets, and the dora indicators, turn so their tiles read
+    /// upright for this viewer and tilt up like a display stand. The local player's own tiles stay flat.
+    /// This is purely visual, so it isn't synced: every player sees the table turned toward themselves.
     void UpdatePonds()
     {
         if (pondAnchors == null || pondAnchors.Length < 4) return;
         if (!pondHomeSaved)
         {
-            for (int s = 0; s < 4; s++)
+            SaveHomes(pondAnchors, pondHome, pondHomeRot);
+            SaveHomes(meldAnchors, meldHome, meldHomeRot);
+            if (doraAnchor != null)
             {
-                if (pondAnchors[s] == null) continue;
-                pondHome[s] = pondAnchors[s].localPosition;
-                pondHomeRot[s] = pondAnchors[s].localRotation;
+                doraHome = doraAnchor.localPosition;
+                doraHomeRot = doraAnchor.localRotation;
             }
             pondHomeSaved = true;
         }
@@ -1622,7 +1668,7 @@ public class MahjongGame : UdonSharpBehaviour
         Vector3 viewer;
         if (me >= 0 && pondAnchors[me] != null)
         {
-            // Seated: look from about where that seat's player sits, so the ponds hold still.
+            // Seated: look from about where that seat's player sits, so the tiles hold still.
             Vector3 centre = transform.position;
             Vector3 home = pondAnchors[me].parent.TransformPoint(pondHome[me]);
             Vector3 out1 = home - centre;
@@ -1638,24 +1684,44 @@ public class MahjongGame : UdonSharpBehaviour
 
         for (int s = 0; s < 4; s++)
         {
-            Transform p = pondAnchors[s];
-            if (p == null) continue;
-            if (!faceOtherPonds || s == me)
-            {
-                p.localPosition = pondHome[s];
-                p.localRotation = pondHomeRot[s];
-                p.localScale = Vector3.one;
-                continue;
-            }
-            Vector3 homeWorld = p.parent.TransformPoint(pondHome[s]);
-            Vector3 d = viewer - homeWorld;
-            d.y = 0f;
-            if (d.sqrMagnitude < 0.0001f) continue;
-            // Pond +Z (the top of each tile) points away from the viewer, then the far edge tilts up.
-            p.rotation = Quaternion.LookRotation(-d) * Quaternion.Euler(-pondTilt, 0f, 0f);
-            p.position = homeWorld + Vector3.up * (0.2f * pondScale * Mathf.Sin(pondTilt * Mathf.Deg2Rad) + 0.01f);
-            p.localScale = Vector3.one * pondScale;
+            FaceViewer(pondAnchors[s], pondHome[s], pondHomeRot[s], faceOtherPonds && s != me, viewer, pondTilt, pondScale, 0.2f);
+            if (meldAnchors != null && s < meldAnchors.Length)
+                FaceViewer(meldAnchors[s], meldHome[s], meldHomeRot[s], faceOtherMelds && s != me, viewer, meldTilt, meldScale, 0.11f);
         }
+        // halfDepth 0.11 keeps the DORA label in front of the indicators above the table.
+        FaceViewer(doraAnchor, doraHome, doraHomeRot, faceDoraIndicators, viewer, doraTilt, doraScale, 0.11f);
+    }
+
+    void SaveHomes(Transform[] anchors, Vector3[] pos, Quaternion[] rot)
+    {
+        if (anchors == null) return;
+        for (int s = 0; s < anchors.Length && s < 4; s++)
+        {
+            if (anchors[s] == null) continue;
+            pos[s] = anchors[s].localPosition;
+            rot[s] = anchors[s].localRotation;
+        }
+    }
+
+    /// Turns p (at its home spot) so its +Z, the top of each tile, points away from the viewer, tilts the far
+    /// edge up and raises it by enough (halfDepth = distance from the pivot to the near edge) to clear the table.
+    void FaceViewer(Transform p, Vector3 home, Quaternion homeRot, bool face, Vector3 viewer, float tilt, float scale, float halfDepth)
+    {
+        if (p == null) return;
+        if (!face)
+        {
+            p.localPosition = home;
+            p.localRotation = homeRot;
+            p.localScale = Vector3.one;
+            return;
+        }
+        Vector3 homeWorld = p.parent.TransformPoint(home);
+        Vector3 d = viewer - homeWorld;
+        d.y = 0f;
+        if (d.sqrMagnitude < 0.0001f) return;
+        p.rotation = Quaternion.LookRotation(-d) * Quaternion.Euler(-tilt, 0f, 0f);
+        p.position = homeWorld + Vector3.up * (halfDepth * scale * Mathf.Sin(tilt * Mathf.Deg2Rad) + 0.01f);
+        p.localScale = Vector3.one * scale;
     }
 
     // ================= dora shine =================
