@@ -9,8 +9,6 @@ using UdonSharpEditor;
 /// Builds a complete, wired-up riichi mahjong table at the world origin.
 public static class MahjongTableBuilder
 {
-    static readonly string[] Labels  = { "Riichi", "Tsumo", "Ron", "Pon", "Chi", "Kan", "Pass", "Start", "Next Hand", "Reset" };
-    static readonly string[] Actions = { "ActRiichi", "ActTsumo", "ActRon", "ActPon", "ActChi", "ActKan", "ActPass", "ActStart", "ActNextHand", "ActReset" };
 
     const float TableY = 0.775f; // top surface height
     // Layout scale: tiles, spacing and the table all grow together, so nothing overlaps.
@@ -71,6 +69,7 @@ public static class MahjongTableBuilder
         announceText.outlineColor = new Color32(0, 0, 0, 255);
 
         var seatLabels = new TMP_Text[4];
+        var actionButtons = new MahjongButton[4 * MahjongGame.ButtonSlots];
         var handTiles = new MahjongTile[56];
         var discardTiles = new MahjongTile[96];
         var meldTiles = new MahjongTile[64];
@@ -119,13 +118,16 @@ public static class MahjongTableBuilder
                 meldTiles[s * 16 + k] = Tile("Meld" + k, anchor, pos, flat, game, s, k, true);
             }
 
-            // Action buttons
-            for (int b = 0; b < Labels.Length; b++)
+            // Context buttons: the game fills them left to right with only the choices available right now.
+            for (int b = 0; b < MahjongGame.ButtonSlots; b++)
             {
-                var pos = new Vector3((-0.5f + b * 0.1f) * S, TableY + 0.012f, -1.1f * S);
-                var go = ButtonObject("Btn_" + Labels[b], anchor, pos, buttonMat, buttonRenderers, Labels[b]);
+                var pos = new Vector3(-0.42f + b * 0.12f, TableY + 0.012f, -1.1f * S);
+                var go = ButtonObject("Action" + b, anchor, pos, buttonMat, buttonRenderers, "", 0.11f);
                 var btn = UdonSharpUndo.AddComponent<MahjongButton>(go);
-                btn.game = game; btn.action = Actions[b]; btn.label = Labels[b];
+                btn.game = game; btn.seat = s; btn.slot = b;
+                btn.label = go.GetComponentInChildren<TextMeshPro>();
+                btn.face = buttonRenderers[buttonRenderers.Count - 1];
+                actionButtons[s * MahjongGame.ButtonSlots + b] = btn;
                 EditorUtility.SetDirty(btn);
             }
         }
@@ -141,6 +143,7 @@ public static class MahjongTableBuilder
         game.statusAnchor = statusAnchor;
         game.seatLabels = seatLabels;
         game.handTiles = handTiles;
+        game.actionButtons = actionButtons;
         game.discardTiles = discardTiles;
         game.meldTiles = meldTiles;
         game.doraTiles = doraTiles;
@@ -303,21 +306,24 @@ public static class MahjongTableBuilder
         return t;
     }
 
-    static GameObject ButtonObject(string name, Transform parent, Vector3 pos, Material material, List<Renderer> renderers, string label)
+    static GameObject ButtonObject(string name, Transform parent, Vector3 pos, Material material, List<Renderer> renderers, string label, float width = 0.08f)
     {
         var go = new GameObject(name);
         go.transform.SetParent(parent, false);
         go.transform.localPosition = pos;
         var col = go.AddComponent<BoxCollider>();
-        col.size = new Vector3(0.08f, 0.02f, 0.045f);
+        col.size = new Vector3(width, 0.02f, 0.045f);
 
-        var face = Prim(PrimitiveType.Cube, "Face", go.transform, Vector3.zero, Quaternion.identity, new Vector3(0.08f, 0.02f, 0.045f));
+        var face = Prim(PrimitiveType.Cube, "Face", go.transform, Vector3.zero, Quaternion.identity, new Vector3(width, 0.02f, 0.045f));
         Object.DestroyImmediate(face.GetComponent<Collider>());
         var faceRenderer = face.GetComponent<Renderer>();
         faceRenderer.sharedMaterial = material;
         renderers.Add(faceRenderer);
 
-        var t = Text("Label", go.transform, new Vector3(0, 0.0115f, 0), Quaternion.Euler(90, 0, 0), 0.15f, new Vector2(0.08f, 0.045f), Color.black, false);
+        var t = Text("Label", go.transform, new Vector3(0, 0.0115f, 0), Quaternion.Euler(90, 0, 0), 0.15f, new Vector2(width - 0.006f, 0.04f), Color.black, false);
+        t.enableAutoSizing = true;
+        t.fontSizeMin = 0.06f;
+        t.fontSizeMax = 0.15f;
         t.text = label;
         return go;
     }
