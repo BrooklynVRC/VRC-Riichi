@@ -73,6 +73,7 @@ public static class MahjongTableBuilder
         var seatLabels = new TMP_Text[4];
         var actionButtons = new MahjongButton[4 * MahjongGame.ButtonSlots];
         var pondAnchors = new Transform[4];
+        var meldAnchors = new Transform[4];
         var handTiles = new MahjongTile[56];
         var discardTiles = new MahjongTile[96];
         var meldTiles = new MahjongTile[64];
@@ -120,11 +121,17 @@ public static class MahjongTableBuilder
                 discardTiles[s * 24 + k] = Tile("Discard" + k, pond, pos, flat, game, s, k, true);
             }
 
-            // Melds: two melds per row on the player's right
+            // Melds: two melds per row on the player's right, grouped like the pond so they can face viewers.
+            float meldX = 0.47f * S + 3.5f * Pitch;
+            float meldZ = -0.78f * S - 0.5f * (RowPitch + 0.002f);
+            var meldGroup = new GameObject("Melds").transform;
+            meldGroup.SetParent(anchor, false);
+            meldGroup.localPosition = new Vector3(meldX, flatY, meldZ);
+            meldAnchors[s] = meldGroup;
             for (int k = 0; k < 16; k++)
             {
-                var pos = new Vector3(0.47f * S + (k % 8) * Pitch, flatY, -0.78f * S - (k / 8) * (RowPitch + 0.002f));
-                meldTiles[s * 16 + k] = Tile("Meld" + k, anchor, pos, flat, game, s, k, true);
+                var pos = new Vector3(0.47f * S + (k % 8) * Pitch - meldX, 0f, -0.78f * S - (k / 8) * (RowPitch + 0.002f) - meldZ);
+                meldTiles[s * 16 + k] = Tile("Meld" + k, meldGroup, pos, flat, game, s, k, true);
             }
 
             // Context buttons: the game fills them left to right with only the choices available right now.
@@ -143,9 +150,13 @@ public static class MahjongTableBuilder
 
         // Dora indicators in the middle of the table
         var doraTiles = new MahjongTile[5];
+        // Grouped under one anchor so each client can turn and tilt them toward itself, like the ponds.
+        var doraAnchor = new GameObject("DoraIndicators").transform;
+        doraAnchor.SetParent(root.transform, false);
+        doraAnchor.localPosition = new Vector3(0, flatY, 0);
         for (int d = 0; d < 5; d++)
-            doraTiles[d] = Tile("Dora" + d, root.transform, new Vector3(-2 * Pitch + d * Pitch, flatY, 0), flat, game, 0, d, true);
-        Text("DoraLabel", root.transform, new Vector3(0, TableY + 0.002f, -0.08f * S), flat, 0.35f * S, new Vector2(0.4f, 0.06f), Color.white, false).text = "DORA";
+            doraTiles[d] = Tile("Dora" + d, doraAnchor, new Vector3(-2 * Pitch + d * Pitch, 0f, 0f), flat, game, 0, d, true);
+        Text("DoraLabel", doraAnchor, new Vector3(0, TableY + 0.002f - flatY, -0.08f * S), flat, 0.35f * S, new Vector2(0.4f, 0.06f), Color.white, false).text = "DORA";
 
         game.rules = rules;
         game.statusText = status;
@@ -154,6 +165,8 @@ public static class MahjongTableBuilder
         game.handTiles = handTiles;
         game.actionButtons = actionButtons;
         game.pondAnchors = pondAnchors;
+        game.doraAnchor = doraAnchor;
+        game.meldAnchors = meldAnchors;
         game.discardTiles = discardTiles;
         game.meldTiles = meldTiles;
         game.doraTiles = doraTiles;
