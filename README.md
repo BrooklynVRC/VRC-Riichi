@@ -8,6 +8,7 @@ A networked 4-player riichi mahjong table for VRChat worlds, written in UdonShar
 - Each tile shows its number (or wind) in the corner of the picture. Turn it off with `showTileNumbers`.
 - Context buttons: only the moves you can make right now appear, such as Tsumo, Riichi, Ron, Pon, Pass, or one Chi button per sequence (Chi 3-4-5m). Discarding is just clicking a tile.
 - Dora tiles and red fives glow with a slow golden pulse (`showDoraShine`, plus color and speed settings). It uses material emission, so a custom tile material needs emission for the glow to show.
+- Readable discards: on your screen, every other player's discards turn to face you and tilt up like a display stand, so you can read them from your seat. Your own stay flat. Adjust `pondTilt` and `pondScale`, or turn it off with `faceOtherPonds`.
 - Tiles you can claim light up, and a timed call window gives you time to decide before play moves on.
 - A large announcer above the table shows the last discard and calls such as PON!, RIICHI! and RON!.
 - **Bots:** they discard by shanten and tile acceptance, keep dora, red fives and honor pairs, and declare riichi on good waits while avoiding furiten. They only call when it speeds up a hand that keeps a yaku (yakuhai, tanyao or honitsu). Against riichi they push when close to ready and fold otherwise, using safe tiles, suji and visible honors. If a player leaves mid-game, a bot takes over their seat.

@@ -72,6 +72,7 @@ public static class MahjongTableBuilder
 
         var seatLabels = new TMP_Text[4];
         var actionButtons = new MahjongButton[4 * MahjongGame.ButtonSlots];
+        var pondAnchors = new Transform[4];
         var handTiles = new MahjongTile[56];
         var discardTiles = new MahjongTile[96];
         var meldTiles = new MahjongTile[64];
@@ -106,11 +107,17 @@ public static class MahjongTableBuilder
                 handTiles[s * 14 + k] = Tile("Hand" + k, anchor, pos, Quaternion.Euler(15, 0, 0), game, s, k, false);
             }
 
-            // Discards: 6 per row toward the center
+            // Discards: 6 per row toward the center, grouped under a pond anchor at the pond's centre so each
+            // client can turn and tilt the other players' ponds toward itself.
+            float pondZ = -0.33f * S - 1.5f * RowPitch;
+            var pond = new GameObject("Pond").transform;
+            pond.SetParent(anchor, false);
+            pond.localPosition = new Vector3(0, flatY, pondZ);
+            pondAnchors[s] = pond;
             for (int k = 0; k < 24; k++)
             {
-                var pos = new Vector3(-2.5f * Pitch + (k % 6) * Pitch, flatY, -0.33f * S - (k / 6) * RowPitch);
-                discardTiles[s * 24 + k] = Tile("Discard" + k, anchor, pos, flat, game, s, k, true);
+                var pos = new Vector3(-2.5f * Pitch + (k % 6) * Pitch, 0f, -0.33f * S - (k / 6) * RowPitch - pondZ);
+                discardTiles[s * 24 + k] = Tile("Discard" + k, pond, pos, flat, game, s, k, true);
             }
 
             // Melds: two melds per row on the player's right
@@ -146,6 +153,7 @@ public static class MahjongTableBuilder
         game.seatLabels = seatLabels;
         game.handTiles = handTiles;
         game.actionButtons = actionButtons;
+        game.pondAnchors = pondAnchors;
         game.discardTiles = discardTiles;
         game.meldTiles = meldTiles;
         game.doraTiles = doraTiles;
