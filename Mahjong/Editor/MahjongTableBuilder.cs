@@ -36,6 +36,8 @@ public static class MahjongTableBuilder
         tileMat = GetOrCreateMaterial("MJ_Tile", new Color(0.96f, 0.94f, 0.86f));
         tileBackMat = GetOrCreateMaterial("MJ_TileBack", new Color(0.1f, 0.45f, 0.3f));
         tileFaceMat = GetOrCreateFaceMaterial();
+        EnableEmission(tileMat);
+        EnableEmission(tileFaceMat);
         buttonMat = GetOrCreateMaterial("MJ_Button", new Color(0.85f, 0.85f, 0.85f));
         sitButtonMat = GetOrCreateMaterial("MJ_SitButton", new Color(0.95f, 0.75f, 0.2f));
         buttonRenderers = new List<Renderer>();
@@ -264,6 +266,16 @@ public static class MahjongTableBuilder
         }
         if (tex == null) Debug.LogWarning("[Mahjong] " + AtlasPath + " not found; tiles will show blank faces.");
         return mat;
+    }
+
+    /// Turns on emission (black, so it looks the same) so the game can make dora tiles glow at runtime.
+    static void EnableEmission(Material mat)
+    {
+        if (mat == null || mat.IsKeywordEnabled("_EMISSION")) return;
+        mat.EnableKeyword("_EMISSION");
+        if (mat.HasProperty("_EmissionColor")) mat.SetColor("_EmissionColor", Color.black);
+        mat.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
+        EditorUtility.SetDirty(mat);
     }
 
     static Material GetOrCreateMaterial(string name, Color color)

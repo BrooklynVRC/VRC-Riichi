@@ -45,6 +45,10 @@ public class MahjongTile : UdonSharpBehaviour
     MaterialPropertyBlock bodyBlock;
     MaterialPropertyBlock faceBlock;
 
+    /// True while this tile shows a dora face; the game pulses its glow with SetShine.
+    [System.NonSerialized] public bool shining = false;
+    Color shineNow = new Color(0f, 0f, 0f);
+
     public override void Interact()
     {
         if (displayOnly || game == null) return;
@@ -56,6 +60,7 @@ public class MahjongTile : UdonSharpBehaviour
         SetVisible(false);
         if (face != null) face.enabled = false;
         if (numberLabel != null) numberLabel.enabled = false;
+        StopShine();
     }
 
     /// tint: 0 normal, 1 selected / latest discard, 2 dimmed, 3 call / riichi / kan opportunity,
@@ -87,6 +92,8 @@ public class MahjongTile : UdonSharpBehaviour
         else if (label != null) label.text = FaceText(id);
 
         SetLifted(tint == 1 || tint == 3 || tint == 4);
+        shining = game != null && game.IsDoraId(id);
+        if (!shining) StopShine();
     }
 
     public void ShowBack()
@@ -106,6 +113,31 @@ public class MahjongTile : UdonSharpBehaviour
             bodyBlock = Tint(body, bodyBlock, backColor);
         }
         SetLifted(false);
+        StopShine();
+    }
+
+    /// Sets the glow (emission) on the tile body and, more softly, on its picture.
+    public void SetShine(Color c)
+    {
+        if (c.r == shineNow.r && c.g == shineNow.g && c.b == shineNow.b) return;
+        shineNow = c;
+        if (body != null)
+        {
+            if (bodyBlock == null) bodyBlock = new MaterialPropertyBlock();
+            bodyBlock.SetColor("_EmissionColor", c);
+            body.SetPropertyBlock(bodyBlock);
+        }
+        if (face != null && faceBlock != null)
+        {
+            faceBlock.SetColor("_EmissionColor", c * 0.5f);
+            face.SetPropertyBlock(faceBlock);
+        }
+    }
+
+    void StopShine()
+    {
+        shining = false;
+        SetShine(new Color(0f, 0f, 0f));
     }
 
     /// Called by the game to apply its material slots.
