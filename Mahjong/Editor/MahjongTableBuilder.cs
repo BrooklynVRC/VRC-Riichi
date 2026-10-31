@@ -77,6 +77,8 @@ public static class MahjongTableBuilder
         var handTiles = new MahjongTile[56];
         var discardTiles = new MahjongTile[96];
         var meldTiles = new MahjongTile[64];
+        var waitTiles = new MahjongTile[4 * MahjongGame.WaitSlots];
+        var waitLabels = new TMP_Text[4];
         var flat = Quaternion.Euler(90, 0, 0);
         float flatY = TableY + TileSize.z * 0.5f;
 
@@ -107,6 +109,22 @@ public static class MahjongTableBuilder
                 var pos = new Vector3(x, TableY + TileSize.y * 0.5f, -0.95f * S);
                 handTiles[s * 14 + k] = Tile("Hand" + k, anchor, pos, Quaternion.Euler(15, 0, 0), game, s, k, false);
             }
+
+            // Waits: small tiles floating above the hand, tilted like it. Only the seat's own player sees them.
+            var waits = new GameObject("Waits").transform;
+            waits.SetParent(anchor, false);
+            waits.localPosition = new Vector3(0, TableY + TileSize.y + 0.07f * S, -0.97f * S);
+            waits.localRotation = Quaternion.Euler(15, 0, 0);
+            const float WaitScale = 0.6f;
+            for (int k = 0; k < MahjongGame.WaitSlots; k++)
+            {
+                var pos = new Vector3((k - (MahjongGame.WaitSlots - 1) * 0.5f) * Pitch * WaitScale * 1.05f, 0f, 0f);
+                var wt = Tile("Wait" + k, waits, pos, Quaternion.identity, game, s, k, true);
+                wt.transform.localScale = Vector3.one * WaitScale;
+                waitTiles[s * MahjongGame.WaitSlots + k] = wt;
+            }
+            waitLabels[s] = Text("WaitLabel", waits, new Vector3(0, TileSize.y * WaitScale * 0.5f + 0.018f, 0), Quaternion.identity, 0.3f * S, new Vector2(0.7f, 0.05f), Color.white, false);
+            waitLabels[s].text = "";
 
             // Discards: 6 per row toward the center, grouped under a pond anchor at the pond's centre so each
             // client can turn and tilt the other players' ponds toward itself.
@@ -158,7 +176,21 @@ public static class MahjongTableBuilder
             doraTiles[d] = Tile("Dora" + d, doraAnchor, new Vector3(-2 * Pitch + d * Pitch, 0f, 0f), flat, game, 0, d, true);
         Text("DoraLabel", doraAnchor, new Vector3(0, TableY + 0.002f - flatY, -0.08f * S), flat, 0.35f * S, new Vector2(0.4f, 0.06f), Color.white, false).text = "DORA";
 
+        // Sounds: one 3D source over the table centre. Drop clips into the Sounds slots on MahjongGame.
+        var sfxGo = new GameObject("Sounds");
+        sfxGo.transform.SetParent(root.transform, false);
+        sfxGo.transform.localPosition = new Vector3(0, TableY + 0.2f, 0);
+        var sfx = sfxGo.AddComponent<AudioSource>();
+        sfx.playOnAwake = false;
+        sfx.spatialBlend = 1f;
+        sfx.minDistance = 2f;
+        sfx.maxDistance = 12f;
+        sfx.rolloffMode = AudioRolloffMode.Linear;
+
         game.rules = rules;
+        game.waitTiles = waitTiles;
+        game.waitLabels = waitLabels;
+        game.sfxSource = sfx;
         game.statusText = status;
         game.statusAnchor = statusAnchor;
         game.seatLabels = seatLabels;
@@ -202,6 +234,7 @@ public static class MahjongTableBuilder
             ApplyTiles(game.discardTiles, game);
             ApplyTiles(game.meldTiles, game);
             ApplyTiles(game.doraTiles, game);
+            ApplyTiles(game.waitTiles, game);
             ApplyRenderers(game.tableRenderers, game.tableMaterial);
             ApplyRenderers(game.buttonRenderers, game.buttonMaterial);
             ApplyRenderers(game.sitButtonRenderers, game.sitButtonMaterial);

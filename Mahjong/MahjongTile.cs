@@ -37,8 +37,10 @@ public class MahjongTile : UdonSharpBehaviour
     Color backColor = new Color(0.1f, 0.45f, 0.3f);
     Color callColor = new Color(0.45f, 1f, 0.45f);
     Color winColor = new Color(1f, 0.45f, 0.3f);
+    Color selectColor = new Color(1f, 0.95f, 0.55f);
 
     const float LiftHeight = 0.012f;
+    const float SelectLift = 0.03f;   // a selected tile rises clearly above the rest of the hand
     Vector3 basePos;
     bool hasBasePos = false;
 
@@ -64,7 +66,8 @@ public class MahjongTile : UdonSharpBehaviour
     }
 
     /// tint: 0 normal, 1 selected / latest discard, 2 dimmed, 3 call / riichi / kan opportunity,
-    /// 4 winning tile (ron / tsumo), 5 riichi declaration marker (gold, not lifted)
+    /// 4 winning tile (ron / tsumo), 5 riichi declaration marker (gold, not lifted),
+    /// 6 selected in your hand (raised high: click it again to discard)
     public void ShowFace(int id, int tint)
     {
         SetVisible(true);
@@ -74,6 +77,7 @@ public class MahjongTile : UdonSharpBehaviour
         else if (tint == 3) c = callColor;
         else if (tint == 4) c = winColor;
         else if (tint == 5) c = highlightColor;
+        else if (tint == 6) c = selectColor;
         UseMaterial(body, bodyMaterial);
         bodyBlock = Tint(body, bodyBlock, c);
 
@@ -91,7 +95,7 @@ public class MahjongTile : UdonSharpBehaviour
         }
         else if (label != null) label.text = FaceText(id);
 
-        SetLifted(tint == 1 || tint == 3 || tint == 4);
+        SetLifted(tint == 6 ? SelectLift : (tint == 1 || tint == 3 || tint == 4 ? LiftHeight : 0f));
         shining = game != null && game.IsDoraId(id);
         if (!shining) StopShine();
     }
@@ -112,7 +116,7 @@ public class MahjongTile : UdonSharpBehaviour
             UseMaterial(body, bodyMaterial);
             bodyBlock = Tint(body, bodyBlock, backColor);
         }
-        SetLifted(false);
+        SetLifted(0f);
         StopShine();
     }
 
@@ -192,15 +196,15 @@ public class MahjongTile : UdonSharpBehaviour
         return 34;                           // red dragon
     }
 
-    /// Raises highlighted tiles slightly so they stand out.
-    void SetLifted(bool lifted)
+    /// Raises highlighted tiles so they stand out.
+    void SetLifted(float height)
     {
         if (!hasBasePos)
         {
             basePos = transform.localPosition;
             hasBasePos = true;
         }
-        transform.localPosition = lifted ? basePos + new Vector3(0f, LiftHeight, 0f) : basePos;
+        transform.localPosition = basePos + new Vector3(0f, height, 0f);
     }
 
     void SetVisible(bool visible)
