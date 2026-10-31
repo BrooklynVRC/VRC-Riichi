@@ -44,6 +44,9 @@ public class MahjongRules : UdonSharpBehaviour
     bool hasIppatsu;
     bool lastTile;
     bool rinshan;
+    bool hasDoubleRiichi;
+    int heavenly;          // 1 tenhou (dealer's first draw), 2 chiihou (non-dealer's first draw, no calls yet)
+    bool robbedKan;        // chankan
     int doraHan;
 
     int bestBase;
@@ -134,6 +137,20 @@ public class MahjongRules : UdonSharpBehaviour
         return false;
     }
 
+    /// Marks in waits[] every tile type that completes the closed counts (13 - 3 * meldCount tiles) and returns
+    /// how many there are.
+    public int FindWaits(int[] c, int meldCount, bool[] waits)
+    {
+        bool kokushiLike = meldCount == 0 && TermHonorKinds(c) >= 12;
+        int n = 0;
+        for (int t = 0; t < 34; t++)
+        {
+            waits[t] = (kokushiLike || Touches(c, t)) && IsWait(c, meldCount, t);
+            if (waits[t]) n++;
+        }
+        return n;
+    }
+
     bool Touches(int[] c, int t)
     {
         if (c[t] > 0) return true;
@@ -157,12 +174,17 @@ public class MahjongRules : UdonSharpBehaviour
 
     /// Scores a complete hand. hand[handOffset .. handOffset+14) are the closed ids (-1 = empty); extraId is the
     /// ron tile (or -1 for tsumo, where the drawn tile is already in hand). Returns false if there is no yaku.
+    /// doubleRiichi: riichi was declared on the first discard. firstDraw: tsumo on the player's very first draw
+    /// with no calls yet (tenhou for the dealer, chiihou otherwise). chankan: ron on a tile added to a kan.
     public bool EvaluateWin(int[] hand, int handOffset, int extraId,
         int[] meldIds, int[] meldKinds, int seat, int meldCount,
         int winId, bool tsumo, int seatWind, int roundWind,
         bool riichi, bool ippatsu, bool last, bool afterKan,
-        int[] wall, int doraCount)
+        int[] wall, int doraCount, bool doubleRiichi, bool firstDraw, bool chankan)
     {
+        hasDoubleRiichi = riichi && doubleRiichi;
+        heavenly = firstDraw && tsumo && meldCount == 0 ? (seatWind == 0 ? 1 : 2) : 0;
+        robbedKan = chankan && !tsumo;
         for (int i = 0; i < 34; i++) { cnt[i] = 0; all[i] = 0; }
         int aka = 0;
         for (int k = 0; k < 14; k++)
@@ -361,6 +383,7 @@ public class MahjongRules : UdonSharpBehaviour
         if (allGreen) { yakuman++; text = Add(text, "Ryuuiisou", 13); }
         if (kans == 4) { yakuman++; text = Add(text, "Suukantsu", 13); }
         if (meldSets == 0 && suits == 1 && !hasHonor && IsChuuren()) { yakuman++; text = Add(text, "Chuuren Poutou", 13); }
+        if (heavenly > 0) { yakuman++; text = Add(text, HeavenlyName(), 13); }
 
         if (yakuman > 0)
         {
@@ -373,7 +396,20 @@ public class MahjongRules : UdonSharpBehaviour
         text = CommonText();
         if (pinfu) { han += 1; text = Add(text, "Pinfu", 1); }
         if (allSimple) { han += 1; text = Add(text, "Tanyao", 1); }
-        if (yakuhai > 0) { han += yakuhai; text = Add(text, "Yakuhai", yakuhai); }
+        if (yakuhai > 0)
+        {
+            han += yakuhai;
+            for (int s = 0; s < 4; s++)
+            {
+                if (setKind[s] == 0) continue;
+                int st = setStart[s];
+                if (st == 31) text = Add(text, "Haku", 1);
+                else if (st == 32) text = Add(text, "Hatsu", 1);
+                else if (st == 33) text = Add(text, "Chun", 1);
+                if (st == seatWindT) text = Add(text, "Seat Wind", 1);
+                if (st == roundWindT) text = Add(text, "Round Wind", 1);
+            }
+        }
 
         if (menzen)
         {
@@ -443,9 +479,13 @@ public class MahjongRules : UdonSharpBehaviour
             if (IsTermOrHonor(t)) allSimple = false; else allTermHonor = false;
             if (t >= 27) hasHonor = true; else { suitMask |= 1 << (t / 9); allHonor = false; }
         }
-        if (allHonor)
+        if (allHonor || heavenly > 0)
         {
-            Consider(8000, 13, 0, 1, "Tsuuiisou (13)");
+            int ym = 0;
+            string yt = "";
+            if (allHonor) { ym++; yt = Add(yt, "Tsuuiisou", 13); }
+            if (heavenly > 0) { ym++; yt = Add(yt, HeavenlyName(), 13); }
+            Consider(8000 * ym, 13 * ym, 0, ym, yt);
             return;
         }
         int suits = (suitMask & 1) + ((suitMask >> 1) & 1) + ((suitMask >> 2) & 1);
@@ -462,29 +502,39 @@ public class MahjongRules : UdonSharpBehaviour
 
     void ScoreKokushi()
     {
-        Consider(8000, 13, 0, 1, "Kokushi Musou (13)");
+        if (heavenly > 0) Consider(16000, 26, 0, 2, "Kokushi Musou, " + HeavenlyName());
+        else Consider(8000, 13, 0, 1, "Kokushi Musou");
+    }
+
+    string HeavenlyName()
+    {
+        return heavenly == 1 ? "Tenhou" : "Chiihou";
     }
 
     /// Yaku that don't depend on the decomposition.
     int CommonYaku()
     {
         int han = 0;
-        if (hasRiichi) han++;
+        if (hasDoubleRiichi) han += 2;
+        else if (hasRiichi) han++;
         if (hasIppatsu) han++;
         if (menzen && isTsumo) han++;
         if (lastTile) han++;
         if (rinshan) han++;
+        if (robbedKan) han++;
         return han;
     }
 
     string CommonText()
     {
         string text = "";
-        if (hasRiichi) text = Add(text, "Riichi", 1);
+        if (hasDoubleRiichi) text = Add(text, "Double Riichi", 2);
+        else if (hasRiichi) text = Add(text, "Riichi", 1);
         if (hasIppatsu) text = Add(text, "Ippatsu", 1);
         if (menzen && isTsumo) text = Add(text, "Menzen Tsumo", 1);
         if (lastTile) text = Add(text, isTsumo ? "Haitei" : "Houtei", 1);
         if (rinshan) text = Add(text, "Rinshan Kaihou", 1);
+        if (robbedKan) text = Add(text, "Chankan", 1);
         return text;
     }
 

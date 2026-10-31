@@ -29,6 +29,9 @@ public class MahjongGame : UdonSharpBehaviour
     public Transform[] pondAnchors;       // each seat's discard pond (centre), turned toward the viewer locally
     public Transform doraAnchor;          // dora indicators + label, turned toward the viewer locally
     public Transform[] meldAnchors;       // each seat's called sets, turned toward the viewer locally
+    public MahjongTile[] waitTiles;       // 4 seats x WaitSlots: the tiles you're waiting on (local only)
+    public TMP_Text[] waitLabels;
+    public AudioSource sfxSource;
     public Renderer[] tableRenderers;
     public Renderer[] buttonRenderers;
     public Renderer[] sitButtonRenderers;
@@ -66,10 +69,38 @@ public class MahjongGame : UdonSharpBehaviour
     public float doraTilt = 40f;
     public float doraScale = 1.1f;
 
+    [Header("Sounds (all optional: leave a slot empty for silence)")]
+    [Tooltip("Played for you only when you pick a tile in your hand.")]
+    public AudioClip selectSound;
+    [Tooltip("Played when a tile is put down in a pond. With several clips, one is picked at random each time.")]
+    public AudioClip[] discardSounds;
+    public AudioClip ronSound;
+    public AudioClip tsumoSound;
+    public AudioClip riichiSound;
+    [Tooltip("Pon, chi and kan.")]
+    public AudioClip callSound;
+    [Tooltip("Exhaustive or abortive draw.")]
+    public AudioClip drawGameSound;
+    [Range(0f, 1f)] public float soundVolume = 0.8f;
+    [Tooltip("Random pitch change on each discard, so repeated clacks don't sound identical.")]
+    public float discardPitchVariation = 0.06f;
+
+    [Header("Waits")]
+    [Tooltip("While you're tenpai, the tiles you can win on float above your hand (only you see them). On your turn, " +
+        "selecting a tile previews the waits you'd have after discarding it.")]
+    public bool showWaits = true;
+
     [Header("Rules")]
     [Tooltip("1 = East round only (tonpuusen), 2 = East + South (hanchan).")]
     public int gameLength = 2;
     public int startingPoints = 25000;
+    [Tooltip("On your first draw with 9+ different terminals and honors, you may call an abortive draw (kyuushu kyuuhai).")]
+    public bool allowNineTerminalsDraw = true;
+    [Tooltip("At an exhaustive draw, a player whose discards are all terminals and honors, none called, scores mangan.")]
+    public bool nagashiMangan = true;
+    [Tooltip("In riichi, your drawn tile is discarded for you when you can't win on it.")]
+    public bool autoDiscardInRiichi = true;
+    public float autoDiscardSeconds = 1.0f;
 
     [Header("Timing")]
     [Tooltip("Seconds players get to Ron / Pon / Chi / Kan a discard before it auto-passes. 0 = wait forever.")]
@@ -112,6 +143,7 @@ public class MahjongGame : UdonSharpBehaviour
     const int ActChiCall = 11;
     const int ActKanCall = 12;
     const int ActBotToggle = 13;
+    const int ActNineTerminals = 14;
 
     const int BotSeat = -2;       // seatPlayers value for a bot-controlled seat
 
@@ -129,6 +161,17 @@ public class MahjongGame : UdonSharpBehaviour
     const int BtnStart = 9;
     const int BtnNext = 10;
     const int BtnReset = 11;
+    const int BtnNineTerminals = 12;
+
+    public const int WaitSlots = 13;
+
+    // What a synced announcement is, for its sound.
+    const int KindNone = 0;
+    const int KindRiichi = 1;
+    const int KindCall = 2;
+    const int KindRon = 3;
+    const int KindTsumo = 4;
+    const int KindDraw = 5;
 
     const int OptRon = 1;
     const int OptPon = 2;
@@ -183,7 +226,13 @@ public class MahjongGame : UdonSharpBehaviour
     [UdonSynced] string lastEvent = "";
     [UdonSynced] int timerDeadline = 0;
     [UdonSynced] string announcement = "";
-    [UdonSynced] int announceSerial = 0;   // server time (ms) when the call window / pause ends
+    [UdonSynced] int announceSerial = 0;
+    [UdonSynced] int announceKind = KindNone;
+    [UdonSynced] bool[] firstTurn = new bool[4];    // hasn't discarded yet and nobody has called: tenhou / chiihou / double riichi
+    [UdonSynced] bool[] doubleRiichi = new bool[4];
+    [UdonSynced] bool chankan = false;              // the call window is for robbing an added kan
+    [UdonSynced] int winSeat = -1;                  // shown at hand over: the winner's hand lights up the winning tile
+    [UdonSynced] int winTile = -1;
 
     // ---- local only ----
     bool riichiArmed = false;
@@ -193,7 +242,14 @@ public class MahjongGame : UdonSharpBehaviour
     bool botStepQueued = false;   // owner only
     bool botRiichi = false;
     float nextCountdownRefresh = 0f;
-    int selectedType = -1;
+    int selectedType = -1;          // during calls: which tile type you picked
+    int selectedId = -1;            // on your turn: the tile raised for discard (click it again to discard)
+    int heardDiscards = 0;          // discards already played a sound for
+    int autoDiscardKey = -1;        // owner only
+    int[] waitKey = { -1, -1, -1, -1 };
+    bool[] waitFound = new bool[34];
+    bool[] waitTypes = new bool[136];  // 4 seats x 34, cached per waitKey
+    int[] visibleCount = new int[34];
     // Opportunity highlights for the local player's turn, cached per draw (the riichi check is expensive in Udon).
     int hintKey = -1;
     bool hintTsumo = false;
@@ -304,6 +360,7 @@ public class MahjongGame : UdonSharpBehaviour
             // A late joiner's first state shouldn't replay an old call announcement.
             receivedState = true;
             shownAnnounceSerial = announceSerial;
+            heardDiscards = TotalDiscards();
         }
         Refresh();
     }
@@ -431,6 +488,7 @@ public class MahjongGame : UdonSharpBehaviour
         if (s >= 0) Send(s, ActPassCall, 0);
     }
 
+    /// First click raises a tile (and previews your waits), a second click on the same tile discards it.
     public void OnTileClicked(int s, int slot)
     {
         if (!ControlsSeat(s)) { Hint("Those aren't your tiles."); return; }
@@ -441,14 +499,29 @@ public class MahjongGame : UdonSharpBehaviour
         {
             // Picking a tile chooses which chi / kan to make when there's more than one.
             selectedType = selectedType == id / 4 ? -1 : id / 4;
+            PlaySound(selectSound, 1f);
             Refresh();
             return;
         }
         if (phase != PhaseTurn) return;
         if (s != turn) { Hint("It's " + SeatName(turn) + "'s turn."); return; }
+        if (riichi[s] && id != drawn[s]) { Hint("In riichi you can only discard the tile you drew."); return; }
+        if (riichiArmed && !hintRiichi[id / 4]) { Hint("That discard doesn't leave you tenpai. Pick a green tile."); return; }
+        if (selectedId != id)
+        {
+            selectedId = id;
+            PlaySound(selectSound, 1f);
+            Refresh();
+            return;
+        }
+        // The tile stays raised until the owner's update removes it from the hand.
         Send(s, riichiArmed ? ActRiichiDiscard : ActDiscardTile, id);
-        riichiArmed = false;
-        selectedType = -1;
+    }
+
+    public void ActRedeal()
+    {
+        int s = TurnSeat();
+        if (s >= 0) Send(s, ActNineTerminals, 0);
     }
 
     void Send(int seat, int action, int arg)
@@ -485,6 +558,7 @@ public class MahjongGame : UdonSharpBehaviour
         else if (action == ActPonCall) DoRespond(seat, RespPon, 0);
         else if (action == ActChiCall) DoRespond(seat, RespChi, arg);
         else if (action == ActKanCall) DoRespond(seat, RespKan, 0);
+        else if (action == ActNineTerminals) DoNineTerminals(seat);
     }
 
     void DoSit(int s, VRCPlayerApi caller)
@@ -568,6 +642,7 @@ public class MahjongGame : UdonSharpBehaviour
         for (int s = 0; s < 4; s++)
             for (int k = 0; k < 13; k++)
                 hands[s * HandSlots + k] = wall[wallPos++];
+        for (int s = 0; s < 4; s++) firstTurn[s] = true;
         turn = dealer;
         DrawTile(dealer, false);
         phase = PhaseTurn;
@@ -587,6 +662,8 @@ public class MahjongGame : UdonSharpBehaviour
             riichi[s] = false;
             ippatsu[s] = false;
             tempFuriten[s] = false;
+            firstTurn[s] = false;
+            doubleRiichi[s] = false;
             callOptions[s] = 0;
             callResponse[s] = RespPass;
         }
@@ -599,6 +676,9 @@ public class MahjongGame : UdonSharpBehaviour
         lastDiscarder = -1;
         renchan = false;
         drawHand = false;
+        chankan = false;
+        winSeat = -1;
+        winTile = -1;
     }
 
     void DrawTile(int s, bool rinshan)
@@ -644,11 +724,13 @@ public class MahjongGame : UdonSharpBehaviour
         }
         ippatsu[s] = false;
         if (!riichi[s]) tempFuriten[s] = false;
+        if (declareRiichi) doubleRiichi[s] = firstTurn[s];
+        firstTurn[s] = false;
         pendingRiichi = declareRiichi ? s : -1;
         lastDiscard = id;
         lastDiscarder = s;
-        lastEvent = SeatName(s) + (declareRiichi ? " declared RIICHI!" : " discarded.");
-        if (declareRiichi) Announce("<color=#ff5050>RIICHI!</color>", s);
+        lastEvent = SeatName(s) + (declareRiichi ? (doubleRiichi[s] ? " declared DOUBLE RIICHI!" : " declared RIICHI!") : " discarded.");
+        if (declareRiichi) Announce(doubleRiichi[s] ? "<color=#ff5050>DOUBLE RIICHI!</color>" : "<color=#ff5050>RIICHI!</color>", s, KindRiichi, "");
 
         if (ComputeCallOptions())
         {
@@ -792,12 +874,17 @@ public class MahjongGame : UdonSharpBehaviour
             if (callResponse[s] == RespPending && MaxOptionRank(callOptions[s]) >= (bestRank > 0 ? bestRank : 1)) return;
         }
 
-        if (bestRank == 0) { AdvanceAfterDiscard(); return; }
+        if (bestRank == 0)
+        {
+            if (chankan) FinishAddedKan(lastDiscarder);
+            else AdvanceAfterDiscard();
+            return;
+        }
         int resp = callResponse[best];
         if (resp == RespRon) { WinByRon(best); return; }
 
         EstablishRiichi();
-        for (int s = 0; s < 4; s++) ippatsu[s] = false;
+        for (int s = 0; s < 4; s++) { ippatsu[s] = false; firstTurn[s] = false; }
         int t = lastDiscard / 4;
         int m = meldCount[best];
         int mBase = best * MeldSlots + m * 4;
@@ -844,7 +931,7 @@ public class MahjongGame : UdonSharpBehaviour
             DrawTile(best, true);
         }
         lastEvent = SeatName(best) + " called " + callName + "!";
-        Announce("<color=#ffd040>" + callName.ToUpper() + "!</color>", best);
+        Announce("<color=#ffd040>" + callName.ToUpper() + "!</color>", best, KindCall, "");
     }
 
     void DoOwnKan(int s, int t)
@@ -870,20 +957,96 @@ public class MahjongGame : UdonSharpBehaviour
             meldKinds[s * 4 + m] = MahjongRules.MeldClosedKan;
             meldCount[s]++;
             lastEvent = SeatName(s) + " declared a closed Kan.";
-            Announce("<color=#ffd040>KAN!</color>", s);
+            Announce("<color=#ffd040>KAN!</color>", s, KindCall, "");
         }
         else
         {
             m = PonMeldOf(s, t);
-            melds[s * MeldSlots + m * 4 + 3] = TakeTile(s, t);
+            int added = TakeTile(s, t);
+            melds[s * MeldSlots + m * 4 + 3] = added;
             meldKinds[s * 4 + m] = MahjongRules.MeldAddedKan;
+            drawn[s] = -1;
             lastEvent = SeatName(s) + " added to a Kan.";
-            Announce("<color=#ffd040>KAN!</color>", s);
+            Announce("<color=#ffd040>KAN!</color>", s, KindCall, "");
+            // Anyone waiting on that tile may rob the kan (chankan) before the replacement draw.
+            if (OpenChankanWindow(s, added)) { Commit(); return; }
         }
-        for (int i = 0; i < 4; i++) ippatsu[i] = false;
+        FinishAddedKan(s);
+        Commit();
+    }
+
+    /// The kan is final: kan dora flips, ippatsu and the first go-around end, and s draws a replacement tile.
+    void FinishAddedKan(int s)
+    {
+        if (chankan)
+        {
+            chankan = false;
+            lastDiscard = -1;
+            lastDiscarder = -1;
+        }
+        for (int i = 0; i < 4; i++) { ippatsu[i] = false; firstTurn[i] = false; }
         kanCount++;
         drawn[s] = -1;
+        turn = s;
+        phase = PhaseTurn;
         DrawTile(s, true);
+    }
+
+    /// Opens a ron-only call window on a tile just added to a kan. Returns false (changing nothing) if nobody can ron it.
+    bool OpenChankanWindow(int s, int id)
+    {
+        int prevDiscard = lastDiscard;
+        int prevDiscarder = lastDiscarder;
+        lastDiscard = id;
+        lastDiscarder = s;
+        chankan = true;
+        bool any = false;
+        for (int o = 0; o < 4; o++)
+        {
+            int opts = 0;
+            if (o != s)
+            {
+                CountClosed(o, tc);
+                if (rules.IsWait(tc, meldCount[o], id / 4) && !IsFuriten(o) && EvaluateRon(o)) opts = OptRon;
+            }
+            callOptions[o] = opts;
+            callResponse[o] = opts == 0 ? RespPass : RespPending;
+            chiChoice[o] = -1;
+            if (opts != 0) any = true;
+        }
+        if (!any)
+        {
+            chankan = false;
+            lastDiscard = prevDiscard;
+            lastDiscarder = prevDiscarder;
+            return false;
+        }
+        phase = PhaseCalls;
+        if (callWindowSeconds > 0f) StartTimer(callWindowSeconds);
+        return true;
+    }
+
+    bool CanNineTerminals(int s)
+    {
+        if (!allowNineTerminalsDraw || phase != PhaseTurn || s != turn || !firstTurn[s] || drawn[s] < 0 || meldCount[s] > 0) return false;
+        CountClosed(s, tc);
+        return TermHonorKinds() >= 9;
+    }
+
+    /// Different terminal and honor types in tc.
+    int TermHonorKinds()
+    {
+        int n = 0;
+        for (int t = 0; t < 34; t++) if (tc[t] > 0 && rules.IsTermOrHonor(t)) n++;
+        return n;
+    }
+
+    void DoNineTerminals(int s)
+    {
+        if (!CanNineTerminals(s)) return;
+        lastEvent = SeatName(s) + " called an abortive draw: nine different terminals and honors.";
+        Announce("<color=#a0c8ff>ABORTIVE DRAW</color>", s, KindDraw, "<size=30%>nine terminals</size>");
+        EndHand(true, true);
         Commit();
     }
 
@@ -893,6 +1056,8 @@ public class MahjongGame : UdonSharpBehaviour
         CountClosed(s, tc);
         if (!rules.IsCompleteShape(tc, meldCount[s])) { lastEvent = "That hand isn't complete."; Commit(); return; }
         if (!Evaluate(s, -1, drawn[s], true)) { lastEvent = "No yaku - can't win with that hand."; Commit(); return; }
+        winSeat = s;
+        winTile = drawn[s];
 
         int b = rules.resultBase;
         int total = 0;
@@ -907,7 +1072,7 @@ public class MahjongGame : UdonSharpBehaviour
         scores[s] += total;
         riichiSticks = 0;
         lastEvent = SeatName(s) + " wins by TSUMO! " + ResultLine() + " (+" + total + ")";
-        Announce("<color=#ff7755>TSUMO!</color>", s);
+        Announce("<color=#ff7755>TSUMO!</color>", s, KindTsumo, WinSubLine(total));
         EndHand(s == dealer, false);
         Commit();
     }
@@ -916,14 +1081,36 @@ public class MahjongGame : UdonSharpBehaviour
     {
         pendingRiichi = -1; // a riichi declaration tile that deals in doesn't count
         Evaluate(s, lastDiscard, lastDiscard, false);
+        winSeat = s;
+        winTile = lastDiscard;
+        if (chankan) UndoAddedKan(lastDiscarder, lastDiscard);
         int pay = rules.RoundUp100(rules.resultBase * (s == dealer ? 6 : 4)) + 300 * honba;
         scores[lastDiscarder] -= pay;
         scores[s] += pay + riichiSticks * 1000;
         int total = pay + riichiSticks * 1000;
         riichiSticks = 0;
-        lastEvent = SeatName(s) + " wins by RON from " + SeatName(lastDiscarder) + "! " + ResultLine() + " (+" + total + ")";
-        Announce("<color=#ff7755>RON!</color>", s);
+        lastEvent = SeatName(s) + " wins by RON" + (chankan ? " (robbing the kan)" : "") + " from " + SeatName(lastDiscarder) + "! " + ResultLine() + " (+" + total + ")";
+        Announce("<color=#ff7755>RON!</color>", s, KindRon, WinSubLine(total));
         EndHand(s == dealer, false);
+    }
+
+    /// Chankan: the robbed tile leaves the kan, which goes back to being a pon.
+    void UndoAddedKan(int s, int id)
+    {
+        for (int m = 0; m < meldCount[s]; m++)
+        {
+            if (meldKinds[s * 4 + m] != MahjongRules.MeldAddedKan || melds[s * MeldSlots + m * 4 + 3] != id) continue;
+            melds[s * MeldSlots + m * 4 + 3] = -1;
+            meldKinds[s * 4 + m] = MahjongRules.MeldPon;
+        }
+    }
+
+    /// "Mangan · +8000" under a win announcement.
+    string WinSubLine(int total)
+    {
+        string limit = rules.LimitName(rules.resultBase, rules.resultYakuman);
+        string size = limit.Length > 0 ? limit : rules.resultHan + " han " + rules.resultFu + " fu";
+        return "<size=30%>" + size + "  +" + total + "</size>";
     }
 
     void ExhaustiveDraw()
@@ -936,6 +1123,11 @@ public class MahjongGame : UdonSharpBehaviour
             tenpai[s] = riichi[s] || rules.IsTenpai(tc, meldCount[s]);
             if (tenpai[s]) n++;
         }
+        if (nagashiMangan && PayNagashi())
+        {
+            EndHand(tenpai[dealer], true);
+            return;
+        }
         string names = "";
         if (n > 0 && n < 4)
         {
@@ -946,8 +1138,40 @@ public class MahjongGame : UdonSharpBehaviour
             }
         }
         lastEvent = "Exhaustive draw. Tenpai: " + (n == 0 ? "nobody" : (n == 4 ? "everyone" : names)) + ".";
-        Announce("<color=#a0c8ff>DRAW</color>", -1);
+        Announce("<color=#a0c8ff>DRAW</color>", -1, KindDraw, "");
         EndHand(tenpai[dealer], true);
+    }
+
+    /// Nagashi mangan: every discard a terminal or honor and none of them called. Paid like a mangan tsumo,
+    /// in place of the tenpai payments. Returns false if nobody qualifies.
+    bool PayNagashi()
+    {
+        string names = "";
+        int who = -1;
+        for (int s = 0; s < 4; s++)
+        {
+            if (discardCount[s] == 0) continue;
+            bool ok = true;
+            for (int k = 0; k < discardCount[s] && ok; k++)
+            {
+                int i = s * DiscardSlots + k;
+                if ((discardFlags[i] & 2) != 0 || !rules.IsTermOrHonor(discards[i] / 4)) ok = false;
+            }
+            if (!ok) continue;
+            who = s;
+            for (int o = 0; o < 4; o++)
+            {
+                if (o == s) continue;
+                int pay = (s == dealer || o == dealer) ? 4000 : 2000;
+                scores[o] -= pay;
+                scores[s] += pay;
+            }
+            names += (names.Length > 0 ? ", " : "") + SeatName(s);
+        }
+        if (who < 0) return false;
+        lastEvent = "Exhaustive draw. NAGASHI MANGAN for " + names + "!";
+        Announce("<color=#ff7755>NAGASHI MANGAN!</color>", who, KindTsumo, "");
+        return true;
     }
 
     void EndHand(bool dealerKeeps, bool isDraw)
@@ -979,7 +1203,8 @@ public class MahjongGame : UdonSharpBehaviour
     {
         bool last = Remaining() <= 0 && !(tsumo && afterKan);
         return rules.EvaluateWin(hands, s * HandSlots, extraId, melds, meldKinds, s, meldCount[s],
-            winId, tsumo, SeatWind(s), roundWind, riichi[s], ippatsu[s], last, tsumo && afterKan, wall, 1 + kanCount);
+            winId, tsumo, SeatWind(s), roundWind, riichi[s], ippatsu[s], last, tsumo && afterKan, wall, 1 + kanCount,
+            doubleRiichi[s], tsumo && firstTurn[s], chankan && !tsumo);
     }
 
     string ResultLine()
@@ -1187,6 +1412,28 @@ public class MahjongGame : UdonSharpBehaviour
         RequestSerialization();
         Refresh();
         ScheduleBots();
+        ScheduleAutoDiscard();
+    }
+
+    /// Owner: a player in riichi who drew a tile they can't win on gets it discarded for them.
+    void ScheduleAutoDiscard()
+    {
+        if (!autoDiscardInRiichi || !Networking.IsOwner(gameObject)) return;
+        if (phase != PhaseTurn || IsBot(turn) || !riichi[turn] || drawn[turn] < 0) return;
+        int key = wallPos * 8 + kanCount;
+        if (key == autoDiscardKey) return;
+        autoDiscardKey = key;
+        SendCustomEventDelayedSeconds(nameof(_AutoDiscard), autoDiscardSeconds > 0f ? autoDiscardSeconds : 0.05f);
+    }
+
+    public void _AutoDiscard()
+    {
+        if (!Networking.IsOwner(gameObject)) return;
+        if (phase != PhaseTurn || IsBot(turn) || !riichi[turn] || drawn[turn] < 0) return;
+        if (wallPos * 8 + kanCount != autoDiscardKey) return;
+        CountClosed(turn, tc);
+        if (rules.IsCompleteShape(tc, meldCount[turn]) && Evaluate(turn, -1, drawn[turn], true)) return; // their call: Tsumo
+        DoDiscard(turn, drawn[turn], false);
     }
 
     // ================= bots (run by the owner) =================
@@ -1243,6 +1490,13 @@ public class MahjongGame : UdonSharpBehaviour
             DoTsumo(s);
             return;
         }
+        // Nine terminals: take the redeal unless kokushi is already close.
+        if (CanNineTerminals(s) && TermHonorKinds() < 11)
+        {
+            DoNineTerminals(s);
+            return;
+        }
+        CountClosed(s, tc);
         if (riichi[s])
         {
             DoDiscard(s, drawn[s] >= 0 ? drawn[s] : BotTileOfType(s, BotFirstType(s)), false);
@@ -1615,6 +1869,8 @@ public class MahjongGame : UdonSharpBehaviour
         bool reveal = phase == PhaseHandOver || phase == PhaseGameOver;
         if (phase != PhaseTurn) riichiArmed = false;
         if (phase != PhaseCalls && phase != PhaseTurn) selectedType = -1;
+        if (phase != PhaseTurn || !ControlsSeat(turn) || SlotOf(turn, selectedId) < 0) selectedId = -1;
+        PlayEventSounds();
         if (phase == PhaseTurn && ControlsSeat(turn)) UpdateTurnHints();
         else hintTsumo = false;
         discardHintTint = CallHintTint();
@@ -1625,6 +1881,7 @@ public class MahjongGame : UdonSharpBehaviour
             RefreshDiscards(s, inHand);
             RefreshMelds(s, inHand);
             RefreshLabel(s, inHand);
+            RefreshWaits(s, inHand);
         }
 
         if (doraTiles != null)
@@ -1744,6 +2001,7 @@ public class MahjongGame : UdonSharpBehaviour
         AddShining(handTiles);
         AddShining(discardTiles);
         AddShining(meldTiles);
+        AddShining(waitTiles);
         if (announceTile != null && announceTile.shining && shineCount < shineList.Length) shineList[shineCount++] = announceTile;
     }
 
@@ -1773,6 +2031,7 @@ public class MahjongGame : UdonSharpBehaviour
         else if (code == BtnStart) ActStart();
         else if (code == BtnNext) ActNextHand();
         else if (code == BtnReset) ActReset();
+        else if (code == BtnNineTerminals) ActRedeal();
     }
 
     void UpdateButtons()
@@ -1801,6 +2060,7 @@ public class MahjongGame : UdonSharpBehaviour
             if (hintTsumo) AddButton(s, BtnTsumo, 0, "Tsumo");
             if (AnyHint(hintRiichi)) AddButton(s, BtnRiichi, 0, riichiArmed ? "Cancel Riichi" : "Riichi");
             for (int t = 0; t < 34; t++) if (hintKan[t]) AddButton(s, BtnOwnKan, t, "Kan " + TypeName(t));
+            if (CanNineTerminals(s)) AddButton(s, BtnNineTerminals, 0, "9 Terminals: Redeal");
             return;
         }
         if (phase == PhaseCalls && callResponse[s] == RespPending)
@@ -1859,20 +2119,32 @@ public class MahjongGame : UdonSharpBehaviour
         return suit == 0 ? "m" : (suit == 1 ? "p" : "s");
     }
 
-    /// Owner: queue a big announcement that every client shows for announceSeconds.
-    void Announce(string text, int seat)
+    /// Owner: queue a big announcement (and its sound) that every client shows for announceSeconds.
+    /// sub is an extra small line under the seat name, like the points for a win.
+    void Announce(string text, int seat, int kind, string sub)
     {
         announcement = seat >= 0 ? text + "\n<size=40%>" + SeatName(seat) + "</size>" : text;
+        if (sub.Length > 0) announcement += "\n" + sub;
+        announceKind = kind;
         announceSerial++;
     }
 
     void RefreshAnnouncer()
     {
-        if (announceText != null && announceSerial != shownAnnounceSerial)
+        if (announceSerial != shownAnnounceSerial)
         {
             shownAnnounceSerial = announceSerial;
-            announceText.text = announcement;
-            announceHideTime = Time.time + announceSeconds;
+            if (announceText != null)
+            {
+                announceText.text = announcement;
+                // Wins stay up longer so everyone can read the result.
+                announceHideTime = Time.time + announceSeconds * (announceKind == KindRon || announceKind == KindTsumo ? 2f : 1f);
+            }
+            if (announceKind == KindRon) PlaySound(ronSound, 1f);
+            else if (announceKind == KindTsumo) PlaySound(tsumoSound, 1f);
+            else if (announceKind == KindRiichi) PlaySound(riichiSound, 1f);
+            else if (announceKind == KindCall) PlaySound(callSound, 1f);
+            else if (announceKind == KindDraw) PlaySound(drawGameSound, 1f);
         }
 
         // The last discard, shown large while it's still on the table (it lights up if you can call it).
@@ -1884,7 +2156,134 @@ public class MahjongGame : UdonSharpBehaviour
             if (show) announceTile.ShowFace(lastDiscard, discardHintTint);
             else announceTile.Hide();
         }
-        if (announceCaption != null) announceCaption.text = show ? SeatName(lastDiscarder) + " discarded" : "";
+        if (announceCaption != null) announceCaption.text = show ? SeatName(lastDiscarder) + (chankan ? " added to a kan" : " discarded") : "";
+    }
+
+    // ================= sounds =================
+
+    void PlaySound(AudioClip clip, float pitch)
+    {
+        if (sfxSource == null || clip == null) return;
+        sfxSource.pitch = pitch;
+        sfxSource.PlayOneShot(clip, soundVolume);
+    }
+
+    int TotalDiscards()
+    {
+        return discardCount[0] + discardCount[1] + discardCount[2] + discardCount[3];
+    }
+
+    /// Every client plays the put-down sound when a new tile lands in a pond.
+    void PlayEventSounds()
+    {
+        int total = TotalDiscards();
+        if (total > heardDiscards && discardSounds != null && discardSounds.Length > 0)
+        {
+            AudioClip clip = discardSounds[Random.Range(0, discardSounds.Length)];
+            PlaySound(clip, 1f + Random.Range(-discardPitchVariation, discardPitchVariation));
+        }
+        heardDiscards = total;
+    }
+
+    // ================= waits =================
+
+    /// Local only: while the local player is tenpai their waits float above their hand, with how many of those tiles
+    /// they can't see yet. On their turn, the selected tile previews the waits after discarding it.
+    void RefreshWaits(int s, bool inHand)
+    {
+        if (waitTiles == null) return;
+        int n = 0;
+        string caption = "";
+        bool live = phase == PhaseTurn || phase == PhaseCalls || phase == PhasePause;
+        if (showWaits && inHand && live && rules != null && ControlsSeat(s))
+        {
+            CountClosed(s, tc);
+            int closed = 0;
+            for (int t = 0; t < 34; t++) closed += tc[t];
+            bool preview = closed % 3 == 2;
+            bool ok = !preview || (s == turn && selectedId >= 0 && SlotOf(s, selectedId) >= 0);
+            if (ok)
+            {
+                if (preview) tc[selectedId / 4]--;
+                // Only recompute when the hand (or the previewed discard) changes: this is slow in Udon.
+                int key = WaitKey(s);
+                if (key != waitKey[s])
+                {
+                    waitKey[s] = key;
+                    rules.FindWaits(tc, meldCount[s], waitFound);
+                    for (int t = 0; t < 34; t++) if (waitFound[t]) waitTypes[s * 34 + t] = true; else waitTypes[s * 34 + t] = false;
+                }
+                CountVisible(s);
+                int left = 0;
+                bool furiten = tempFuriten[s] && !preview;
+                for (int t = 0; t < 34; t++)
+                {
+                    if (!waitTypes[s * 34 + t]) continue;
+                    int l = 4 - visibleCount[t] - (preview && t == selectedId / 4 ? 1 : 0);
+                    if (l < 0) l = 0;
+                    left += l;
+                    if (!preview && InOwnPond(s, t)) furiten = true;
+                    if (n < WaitSlots) { ShowWaitTile(s * WaitSlots + n, t, l); n++; }
+                }
+                if (n > 0)
+                {
+                    caption = (preview ? "Discard this, wait on" : "Waiting on") + "  <size=80%>(" + left + " left)</size>";
+                    if (furiten) caption = "<color=#ff6666>FURITEN</color>  " + caption;
+                }
+                if (preview) tc[selectedId / 4]++;
+            }
+        }
+        for (int i = n; i < WaitSlots; i++)
+        {
+            int k = s * WaitSlots + i;
+            if (k < waitTiles.Length && waitTiles[k] != null) waitTiles[k].Hide();
+        }
+        if (waitLabels != null && s < waitLabels.Length && waitLabels[s] != null) waitLabels[s].text = caption;
+    }
+
+    void ShowWaitTile(int k, int t, int left)
+    {
+        if (k >= waitTiles.Length || waitTiles[k] == null) return;
+        waitTiles[k].ShowFace(t * 4 + 1, left == 0 ? 2 : 0); // id t*4+1 is never a red five
+    }
+
+    int WaitKey(int s)
+    {
+        int key = meldCount[s] * 7919 + (selectedId + 2) * 104729;
+        for (int t = 0; t < 34; t++) key = key * 5 + tc[t];
+        return key;
+    }
+
+    /// Copies of each tile type the local player can see: their own hand, every pond, every meld and the dora indicators.
+    void CountVisible(int s)
+    {
+        for (int t = 0; t < 34; t++) visibleCount[t] = 0;
+        for (int k = 0; k < HandSlots; k++)
+        {
+            int id = hands[s * HandSlots + k];
+            if (id >= 0) visibleCount[id / 4]++;
+        }
+        for (int o = 0; o < 4; o++)
+        {
+            for (int k = 0; k < discardCount[o] && k < DiscardSlots; k++)
+            {
+                int i = o * DiscardSlots + k;
+                if (discards[i] >= 0 && (discardFlags[i] & 2) == 0) visibleCount[discards[i] / 4]++;
+            }
+            for (int k = 0; k < meldCount[o] * 4; k++)
+            {
+                int id = melds[o * MeldSlots + k];
+                if (id >= 0) visibleCount[id / 4]++;
+            }
+        }
+        for (int d = 0; d < 1 + kanCount; d++) visibleCount[wall[122 + d] / 4]++;
+    }
+
+    bool InOwnPond(int s, int t)
+    {
+        for (int k = 0; k < discardCount[s] && k < DiscardSlots; k++)
+            if (discards[s * DiscardSlots + k] / 4 == t) return true;
+        return false;
     }
 
     void RefreshHand(int s, bool inHand, bool faceUp)
@@ -1905,6 +2304,8 @@ public class MahjongGame : UdonSharpBehaviour
                 n++;
             }
             if (drawn[s] >= 0) displayIds[b + HandSlots - 1] = drawn[s];
+            // A ron winner's revealed hand shows the winning tile in the drawn slot.
+            else if (s == winSeat && winTile >= 0 && (phase == PhaseHandOver || phase == PhaseGameOver)) displayIds[b + HandSlots - 1] = winTile;
         }
 
         if (handTiles == null) return;
@@ -1923,8 +2324,11 @@ public class MahjongGame : UdonSharpBehaviour
             {
                 int tint = 0;
                 int t = id / 4;
-                if (t == selectedType && ControlsSeat(s)) tint = 1;
+                if (s == winSeat && id == winTile) tint = 4;
+                else if (myTurn && id == selectedId) tint = 6;
+                else if (phase == PhaseCalls && t == selectedType && ControlsSeat(s)) tint = 1;
                 else if (myTurn && hintTsumo && id == drawn[s]) tint = 4;
+                else if (myTurn && riichiArmed) tint = hintRiichi[t] ? 3 : 2;
                 else if (myTurn && (hintKan[t] || hintRiichi[t])) tint = 3;
                 else if (myCall && hintCall[t]) tint = 3;
                 else if (locked && id != drawn[s]) tint = 2;
@@ -1944,8 +2348,9 @@ public class MahjongGame : UdonSharpBehaviour
             if (id < 0) { discardTiles[i].Hide(); continue; }
             int f = discardFlags[i];
             int tint = (f & 2) != 0 ? 2 : ((f & 1) != 0 ? 5 : 0);
-            if (s == lastDiscarder && k == discardCount[s] - 1 && (f & 2) == 0 && phase != PhaseHandOver && phase != PhaseGameOver) tint = 1;
-            if (discardHintTint != 0 && s == lastDiscarder && k == discardCount[s] - 1) tint = discardHintTint;
+            bool latest = !chankan && s == lastDiscarder && k == discardCount[s] - 1;
+            if (latest && (f & 2) == 0 && phase != PhaseHandOver && phase != PhaseGameOver) tint = 1;
+            if (latest && discardHintTint != 0) tint = discardHintTint;
             discardTiles[i].ShowFace(id, tint);
         }
     }
@@ -2060,16 +2465,17 @@ public class MahjongGame : UdonSharpBehaviour
                 s += "\n" + SeatName(turn) + " to discard.";
                 if (ControlsSeat(turn))
                 {
-                    s += " Click a tile to discard.";
+                    s += riichi[turn] ? " Your drawn tile goes out on its own unless you can win." : " Click a tile to raise it, click it again to discard.";
                     if (hintTsumo) s += "\n<color=#ff7755>TSUMO is available! (red tile)</color>";
                     if (AnyHint(hintRiichi)) s += "\n<color=#66ff66>Riichi possible: Riichi, then a green tile.</color>";
                     if (AnyHint(hintKan)) s += "\n<color=#66ff66>Kan possible.</color>";
+                    if (CanNineTerminals(turn)) s += "\n<color=#a0c8ff>Nine terminals: you may call a redeal.</color>";
                     if (riichiArmed) s += " <color=#ff6666>Riichi armed.</color>";
                 }
             }
             else if (phase == PhaseCalls)
             {
-                s += "\nWaiting on calls for " + SeatName(lastDiscarder) + "'s discard" + CountdownText() + ".";
+                s += "\nWaiting on calls for " + SeatName(lastDiscarder) + (chankan ? "'s kan (anyone waiting on it may rob it)" : "'s discard") + CountdownText() + ".";
                 for (int i = 1; i < 4; i++)
                 {
                     int c = (lastDiscarder + i) % 4;
