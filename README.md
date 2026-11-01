@@ -1,6 +1,6 @@
 # VRChat Riichi Mahjong
 
-A networked 4-player riichi mahjong table for VRChat worlds, written in UdonSharp. Empty seats can be filled with bots.
+A networked riichi mahjong table for VRChat worlds, written in UdonSharp, for 4 players or 3 (sanma). Empty seats can be filled with bots.
 
 ## Features
 
@@ -8,7 +8,13 @@ A networked 4-player riichi mahjong table for VRChat worlds, written in UdonShar
 - All the standard yaku, including double riichi, chankan (robbing a kan), haitei/houtei, rinshan, and the yakuman tenhou and chiihou. Nagashi mangan and the nine-terminals redeal are on by default and can be turned off. Yakuhai are named in results (Haku, Hatsu, Chun, Seat Wind, Round Wind).
 - Two-click discards: the first click raises and highlights a tile, a second click on it discards it. Clicking a different tile moves the selection.
 - Waits: while you're tenpai, the tiles you can win on float above your hand with a count of how many are still unseen, and a FURITEN warning when it applies. On your turn, raising a tile previews the waits you'd have after discarding it. Only you see your own waits.
-- Sound slots: tile select, tile put down (pick from several clips at random, with slight pitch variation), ron, tsumo, riichi, calls, and draws. All optional.
+- **3-player (sanma):** a second table with the fourth seat left out. 2m–8m are removed, there's no chi, and a 1m indicator makes 9m the dora. On your turn you can set a North aside (Kita) as a bonus dora and draw a replacement tile; others waiting on North can ron it. A tsumo collects only from the two other players. It's all one `threePlayer` setting on `MahjongGame`.
+- Sound slots, all optional:
+  - tile select, and tile put down (picked at random from several clips, with slight pitch variation)
+  - an extra sound when someone discards a dora
+  - ron, tsumo, riichi and double riichi
+  - chi, pon, kan and kita
+  - the draw itself, then each seat's tenpai or no-ten in turn
 - In riichi, your drawn tile is discarded for you when you can't win on it (`autoDiscardInRiichi`).
 - Each tile shows its number (or wind) in the corner of the picture. Turn it off with `showTileNumbers`.
 - Context buttons: only the moves you can make right now appear, such as Tsumo, Riichi, Ron, Pon, Pass, or one Chi button per sequence (Chi 3-4-5m). Nothing appears when you just need to discard.
@@ -30,7 +36,7 @@ A networked 4-player riichi mahjong table for VRChat worlds, written in UdonShar
 ## Install
 
 1. Copy the `Mahjong` folder (and `Mahjong.meta`) into your project's `Assets` folder.
-2. Run **Tools → Mahjong → Build Table**.
+2. Run **Tools → Mahjong → Build Table**, or **Build 3-Player Table** for sanma (it's placed beside the 4-player table, starting at 35,000 points).
 3. Optional: select the table and run **Tools → Mahjong → Save Selected Table As Prefab**.
 4. In game, click **Sit** to take a seat or **Bot** to add a bot, then press **Start**.
 

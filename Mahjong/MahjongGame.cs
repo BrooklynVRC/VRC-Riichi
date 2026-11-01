@@ -5,7 +5,7 @@ using VRC.SDK3.UdonNetworkCalling;
 using VRC.SDKBase;
 using VRC.Udon.Common.Interfaces;
 
-/// Networked 4-player riichi mahjong.
+/// Networked riichi mahjong for 4 players, or 3 (sanma) with threePlayer on: seat 4 stays empty.
 /// Owner-authoritative: every player sends actions to the instance owner with NetAction; only the owner changes
 /// the synced state, then serializes it and every client rebuilds the table visuals.
 /// Seats run counter-clockwise 0..3; seat winds rotate with the dealer. Tile ids and meld kinds: see MahjongRules.
@@ -31,6 +31,7 @@ public class MahjongGame : UdonSharpBehaviour
     public Transform[] meldAnchors;       // each seat's called sets, turned toward the viewer locally
     public MahjongTile[] waitTiles;       // 4 seats x WaitSlots: the tiles you're waiting on (local only)
     public TMP_Text[] waitLabels;
+    public MahjongTile[] kitaTiles;       // 4 seats x 4: Norths set aside (3-player only)
     public AudioSource sfxSource;
     public Renderer[] tableRenderers;
     public Renderer[] buttonRenderers;
@@ -74,13 +75,25 @@ public class MahjongGame : UdonSharpBehaviour
     public AudioClip selectSound;
     [Tooltip("Played when a tile is put down in a pond. With several clips, one is picked at random each time.")]
     public AudioClip[] discardSounds;
+    [Tooltip("Played on top of the put-down sound when the discarded tile is a dora (a red five or a revealed dora).")]
+    public AudioClip doraDiscardSound;
     public AudioClip ronSound;
     public AudioClip tsumoSound;
     public AudioClip riichiSound;
-    [Tooltip("Pon, chi and kan.")]
-    public AudioClip callSound;
+    [Tooltip("Optional: falls back to the riichi sound when empty.")]
+    public AudioClip doubleRiichiSound;
+    public AudioClip chiSound;
+    public AudioClip ponSound;
+    [Tooltip("Open, closed and added kan.")]
+    public AudioClip kanSound;
+    [Tooltip("3-player: a North set aside (kita).")]
+    public AudioClip kitaSound;
     [Tooltip("Exhaustive or abortive draw.")]
     public AudioClip drawGameSound;
+    [Tooltip("At an exhaustive draw, each seat in turn (dealer first) says whether it was tenpai...")]
+    public AudioClip tenpaiSound;
+    [Tooltip("...or not (no-ten).")]
+    public AudioClip notenSound;
     [Range(0f, 1f)] public float soundVolume = 0.8f;
     [Tooltip("Random pitch change on each discard, so repeated clacks don't sound identical.")]
     public float discardPitchVariation = 0.06f;
@@ -91,6 +104,9 @@ public class MahjongGame : UdonSharpBehaviour
     public bool showWaits = true;
 
     [Header("Rules")]
+    [Tooltip("Three-player mahjong (sanma): seat 4 stays empty, 2m-8m are taken out, there's no chi, and Norths can be " +
+        "set aside as bonus dora (kita) for a replacement draw. A tsumo only collects from the two other players.")]
+    public bool threePlayer = false;
     [Tooltip("1 = East round only (tonpuusen), 2 = East + South (hanchan).")]
     public int gameLength = 2;
     public int startingPoints = 25000;
@@ -144,6 +160,7 @@ public class MahjongGame : UdonSharpBehaviour
     const int ActKanCall = 12;
     const int ActBotToggle = 13;
     const int ActNineTerminals = 14;
+    const int ActKita = 15;
 
     const int BotSeat = -2;       // seatPlayers value for a bot-controlled seat
 
@@ -162,16 +179,23 @@ public class MahjongGame : UdonSharpBehaviour
     const int BtnNext = 10;
     const int BtnReset = 11;
     const int BtnNineTerminals = 12;
+    const int BtnKita = 13;
 
     public const int WaitSlots = 13;
 
     // What a synced announcement is, for its sound.
     const int KindNone = 0;
     const int KindRiichi = 1;
-    const int KindCall = 2;
+    const int KindChi = 2;
     const int KindRon = 3;
     const int KindTsumo = 4;
     const int KindDraw = 5;
+    const int KindPon = 6;
+    const int KindKan = 7;
+    const int KindDoubleRiichi = 8;
+    const int KindKita = 9;
+
+    const int NorthType = 30;
 
     const int OptRon = 1;
     const int OptPon = 2;
@@ -189,6 +213,7 @@ public class MahjongGame : UdonSharpBehaviour
     const int DiscardSlots = 24;
     const int MeldSlots = 16;
     const int LiveWallEnd = 122;  // wall[122..135] is the dead wall: dora 122-126, ura 127-131, rinshan 132-135
+    const int SanmaWallStart = 28; // 3-player: the 108 tiles sit in wall[28..135], so the dead wall stays put
 
     [UdonSynced] int[] seatPlayers = { -1, -1, -1, -1 };
     [UdonSynced] int phase = PhaseLobby;
@@ -233,6 +258,11 @@ public class MahjongGame : UdonSharpBehaviour
     [UdonSynced] bool chankan = false;              // the call window is for robbing an added kan
     [UdonSynced] int winSeat = -1;                  // shown at hand over: the winner's hand lights up the winning tile
     [UdonSynced] int winTile = -1;
+    [UdonSynced] int rinshanCount = 0;              // replacement draws taken: kans plus kita
+    [UdonSynced] int[] kitaIds = new int[16];       // 4 seats x 4 Norths set aside
+    [UdonSynced] int[] kitaCount = new int[4];
+    [UdonSynced] bool robKita = false;              // the ron-only window is for a North just set aside
+    [UdonSynced] int drawTenpai = -1;               // tenpai seats (bitmask) at this hand's exhaustive draw
 
     // ---- local only ----
     bool riichiArmed = false;
@@ -245,6 +275,8 @@ public class MahjongGame : UdonSharpBehaviour
     int selectedType = -1;          // during calls: which tile type you picked
     int selectedId = -1;            // on your turn: the tile raised for discard (click it again to discard)
     int heardDiscards = 0;          // discards already played a sound for
+    int drawVoiceStep = 0;          // which seat's tenpai / no-ten voice plays next
+    int drawVoiceSerial = -1;
     int autoDiscardKey = -1;        // owner only
     int[] waitKey = { -1, -1, -1, -1 };
     bool[] waitFound = new bool[34];
@@ -280,6 +312,8 @@ public class MahjongGame : UdonSharpBehaviour
         for (int i = 0; i < 56; i++) { hands[i] = -1; displayIds[i] = -1; }
         for (int i = 0; i < 64; i++) melds[i] = -1;
         for (int i = 0; i < 96; i++) discards[i] = -1;
+        for (int i = 0; i < 16; i++) kitaIds[i] = -1;
+        if (rules != null) rules.sanma = threePlayer;
         ApplyMaterials();
         Refresh();
     }
@@ -291,6 +325,7 @@ public class MahjongGame : UdonSharpBehaviour
         ApplyTileMaterials(discardTiles);
         ApplyTileMaterials(meldTiles);
         ApplyTileMaterials(doraTiles);
+        ApplyTileMaterials(kitaTiles);
         if (announceTile != null)
         {
             announceTile.SetMaterials(tileMaterial, tileBackMaterial, tileFaceMaterial);
@@ -518,6 +553,12 @@ public class MahjongGame : UdonSharpBehaviour
         Send(s, riichiArmed ? ActRiichiDiscard : ActDiscardTile, id);
     }
 
+    public void ActDeclareKita()
+    {
+        int s = TurnSeat();
+        if (s >= 0) Send(s, ActKita, 0);
+    }
+
     public void ActRedeal()
     {
         int s = TurnSeat();
@@ -534,7 +575,7 @@ public class MahjongGame : UdonSharpBehaviour
     [NetworkCallable]
     public void NetAction(int seat, int action, int arg)
     {
-        if (!Networking.IsOwner(gameObject) || seat < 0 || seat > 3) return;
+        if (!Networking.IsOwner(gameObject) || seat < 0 || seat >= Seats()) return;
         VRCPlayerApi caller = NetworkCalling.CallingPlayer;
         if (!Utilities.IsValid(caller)) return;
         int pid = caller.playerId;
@@ -559,6 +600,7 @@ public class MahjongGame : UdonSharpBehaviour
         else if (action == ActChiCall) DoRespond(seat, RespChi, arg);
         else if (action == ActKanCall) DoRespond(seat, RespKan, 0);
         else if (action == ActNineTerminals) DoNineTerminals(seat);
+        else if (action == ActKita) DoKita(seat);
     }
 
     void DoSit(int s, VRCPlayerApi caller)
@@ -594,9 +636,9 @@ public class MahjongGame : UdonSharpBehaviour
     void DoStartGame()
     {
         if (phase != PhaseLobby && phase != PhaseGameOver) return;
-        if (!debugControlAllSeats && SeatedCount() < 4) { lastEvent = "Need 4 players to start."; Commit(); return; }
-        for (int s = 0; s < 4; s++) scores[s] = startingPoints;
-        dealer = Random.Range(0, 4);
+        if (!debugControlAllSeats && SeatedCount() < Seats()) { lastEvent = "Need " + Seats() + " players to start."; Commit(); return; }
+        for (int s = 0; s < 4; s++) scores[s] = s < Seats() ? startingPoints : 0;
+        dealer = Random.Range(0, Seats());
         roundWind = 0;
         kyoku = 0;
         honba = 0;
@@ -613,9 +655,9 @@ public class MahjongGame : UdonSharpBehaviour
         else
         {
             honba = drawHand ? honba + 1 : 0;
-            dealer = (dealer + 1) % 4;
+            dealer = NextSeat(dealer);
             kyoku++;
-            if (kyoku >= 4) { kyoku = 0; roundWind++; }
+            if (kyoku >= Seats()) { kyoku = 0; roundWind++; }
         }
         StartHand();
         lastEvent = RoundName() + " begins.";
@@ -632,17 +674,21 @@ public class MahjongGame : UdonSharpBehaviour
 
     void StartHand()
     {
-        for (int i = 0; i < 136; i++) wall[i] = i;
-        for (int i = 135; i > 0; i--)
+        // 3-player leaves 2m-8m out; the tiles in play always end at wall[135].
+        int start = WallStart();
+        for (int i = 0; i < start; i++) wall[i] = -1;
+        int n = start;
+        for (int i = 0; i < 136; i++) if (!RemovedType(i / 4)) wall[n++] = i;
+        for (int i = 135; i > start; i--)
         {
-            int j = Random.Range(0, i + 1);
+            int j = Random.Range(start, i + 1);
             int t = wall[i]; wall[i] = wall[j]; wall[j] = t;
         }
         ClearTable();
-        for (int s = 0; s < 4; s++)
+        for (int s = 0; s < Seats(); s++)
             for (int k = 0; k < 13; k++)
                 hands[s * HandSlots + k] = wall[wallPos++];
-        for (int s = 0; s < 4; s++) firstTurn[s] = true;
+        for (int s = 0; s < Seats(); s++) firstTurn[s] = true;
         turn = dealer;
         DrawTile(dealer, false);
         phase = PhaseTurn;
@@ -653,10 +699,11 @@ public class MahjongGame : UdonSharpBehaviour
         for (int i = 0; i < 56; i++) hands[i] = -1;
         for (int i = 0; i < 96; i++) { discards[i] = -1; discardFlags[i] = 0; }
         for (int i = 0; i < 64; i++) melds[i] = -1;
-        for (int i = 0; i < 16; i++) meldKinds[i] = 0;
+        for (int i = 0; i < 16; i++) { meldKinds[i] = 0; kitaIds[i] = -1; }
         for (int s = 0; s < 4; s++)
         {
             drawn[s] = -1;
+            kitaCount[s] = 0;
             discardCount[s] = 0;
             meldCount[s] = 0;
             riichi[s] = false;
@@ -667,8 +714,11 @@ public class MahjongGame : UdonSharpBehaviour
             callOptions[s] = 0;
             callResponse[s] = RespPass;
         }
-        wallPos = 0;
+        wallPos = WallStart();
         kanCount = 0;
+        rinshanCount = 0;
+        robKita = false;
+        drawTenpai = -1;
         pendingRiichi = -1;
         canTsumo = false;
         afterKan = false;
@@ -683,7 +733,15 @@ public class MahjongGame : UdonSharpBehaviour
 
     void DrawTile(int s, bool rinshan)
     {
-        int id = rinshan ? wall[136 - kanCount] : wall[wallPos++];
+        int id;
+        if (rinshan)
+        {
+            // The first four replacement tiles come off the end of the dead wall; after that (3-player kita) the
+            // dead wall is topped up from the end of the live wall.
+            rinshanCount++;
+            id = wall[rinshanCount <= 4 ? 136 - rinshanCount : LiveWallEnd - (rinshanCount - 4)];
+        }
+        else id = wall[wallPos++];
         int slot = FirstEmptySlot(s);
         if (slot < 0) return;
         hands[s * HandSlots + slot] = id;
@@ -730,7 +788,7 @@ public class MahjongGame : UdonSharpBehaviour
         lastDiscard = id;
         lastDiscarder = s;
         lastEvent = SeatName(s) + (declareRiichi ? (doubleRiichi[s] ? " declared DOUBLE RIICHI!" : " declared RIICHI!") : " discarded.");
-        if (declareRiichi) Announce(doubleRiichi[s] ? "<color=#ff5050>DOUBLE RIICHI!</color>" : "<color=#ff5050>RIICHI!</color>", s, KindRiichi, "");
+        if (declareRiichi) Announce(doubleRiichi[s] ? "<color=#ff5050>DOUBLE RIICHI!</color>" : "<color=#ff5050>RIICHI!</color>", s, doubleRiichi[s] ? KindDoubleRiichi : KindRiichi, "");
 
         if (ComputeCallOptions())
         {
@@ -794,7 +852,7 @@ public class MahjongGame : UdonSharpBehaviour
         bool any = false;
         int t = lastDiscard / 4;
         bool canCall = Remaining() > 0;
-        for (int s = 0; s < 4; s++)
+        for (int s = 0; s < Seats(); s++)
         {
             int opts = 0;
             if (s != lastDiscarder)
@@ -805,7 +863,7 @@ public class MahjongGame : UdonSharpBehaviour
                 {
                     if (tc[t] >= 2) opts |= OptPon;
                     if (tc[t] >= 3 && kanCount < 4) opts |= OptKan;
-                    if (s == (lastDiscarder + 1) % 4 && t < 27)
+                    if (!threePlayer && s == NextSeat(lastDiscarder) && t < 27)
                         for (int st = t - 2; st <= t; st++) if (ChiPossible(st, t)) opts |= OptChi;
                 }
             }
@@ -821,7 +879,7 @@ public class MahjongGame : UdonSharpBehaviour
     {
         EstablishRiichi();
         if (Remaining() <= 0) { ExhaustiveDraw(); return; }
-        turn = (lastDiscarder + 1) % 4;
+        turn = NextSeat(lastDiscarder);
         DrawTile(turn, false);
         phase = PhaseTurn;
     }
@@ -862,15 +920,15 @@ public class MahjongGame : UdonSharpBehaviour
     {
         int best = -1;
         int bestRank = 0;
-        for (int i = 1; i < 4; i++)
+        for (int i = 1; i < Seats(); i++)
         {
-            int s = (lastDiscarder + i) % 4;
+            int s = (lastDiscarder + i) % Seats();
             int r = ResponseRank(callResponse[s]);
             if (r > bestRank) { bestRank = r; best = s; }
         }
-        for (int i = 1; i < 4; i++)
+        for (int i = 1; i < Seats(); i++)
         {
-            int s = (lastDiscarder + i) % 4;
+            int s = (lastDiscarder + i) % Seats();
             if (callResponse[s] == RespPending && MaxOptionRank(callOptions[s]) >= (bestRank > 0 ? bestRank : 1)) return;
         }
 
@@ -891,6 +949,7 @@ public class MahjongGame : UdonSharpBehaviour
         melds[mBase] = lastDiscard;
         if (discardCount[lastDiscarder] > 0) discardFlags[lastDiscarder * DiscardSlots + discardCount[lastDiscarder] - 1] |= 2;
         string callName;
+        int callKind;
         if (resp == RespChi)
         {
             int st = chiChoice[best];
@@ -903,6 +962,7 @@ public class MahjongGame : UdonSharpBehaviour
             }
             meldKinds[best * 4 + m] = MahjongRules.MeldChi;
             callName = "Chi";
+            callKind = KindChi;
         }
         else if (resp == RespPon)
         {
@@ -910,6 +970,7 @@ public class MahjongGame : UdonSharpBehaviour
             melds[mBase + 2] = TakeTile(best, t);
             meldKinds[best * 4 + m] = MahjongRules.MeldPon;
             callName = "Pon";
+            callKind = KindPon;
         }
         else
         {
@@ -918,6 +979,7 @@ public class MahjongGame : UdonSharpBehaviour
             melds[mBase + 3] = TakeTile(best, t);
             meldKinds[best * 4 + m] = MahjongRules.MeldOpenKan;
             callName = "Kan";
+            callKind = KindKan;
         }
         meldCount[best]++;
         turn = best;
@@ -931,7 +993,7 @@ public class MahjongGame : UdonSharpBehaviour
             DrawTile(best, true);
         }
         lastEvent = SeatName(best) + " called " + callName + "!";
-        Announce("<color=#ffd040>" + callName.ToUpper() + "!</color>", best, KindCall, "");
+        Announce("<color=#ffd040>" + callName.ToUpper() + "!</color>", best, callKind, "");
     }
 
     void DoOwnKan(int s, int t)
@@ -957,7 +1019,7 @@ public class MahjongGame : UdonSharpBehaviour
             meldKinds[s * 4 + m] = MahjongRules.MeldClosedKan;
             meldCount[s]++;
             lastEvent = SeatName(s) + " declared a closed Kan.";
-            Announce("<color=#ffd040>KAN!</color>", s, KindCall, "");
+            Announce("<color=#ffd040>KAN!</color>", s, KindKan, "");
         }
         else
         {
@@ -967,41 +1029,49 @@ public class MahjongGame : UdonSharpBehaviour
             meldKinds[s * 4 + m] = MahjongRules.MeldAddedKan;
             drawn[s] = -1;
             lastEvent = SeatName(s) + " added to a Kan.";
-            Announce("<color=#ffd040>KAN!</color>", s, KindCall, "");
+            Announce("<color=#ffd040>KAN!</color>", s, KindKan, "");
             // Anyone waiting on that tile may rob the kan (chankan) before the replacement draw.
-            if (OpenChankanWindow(s, added)) { Commit(); return; }
+            if (OpenChankanWindow(s, added, false)) { Commit(); return; }
         }
         FinishAddedKan(s);
         Commit();
     }
 
     /// The kan is final: kan dora flips, ippatsu and the first go-around end, and s draws a replacement tile.
+    /// A kita (3-player) also ends here, with just the replacement draw.
     void FinishAddedKan(int s)
     {
+        bool kita = robKita;
         if (chankan)
         {
             chankan = false;
+            robKita = false;
             lastDiscard = -1;
             lastDiscarder = -1;
         }
-        for (int i = 0; i < 4; i++) { ippatsu[i] = false; firstTurn[i] = false; }
-        kanCount++;
+        if (!kita)
+        {
+            for (int i = 0; i < 4; i++) { ippatsu[i] = false; firstTurn[i] = false; }
+            kanCount++;
+        }
         drawn[s] = -1;
         turn = s;
         phase = PhaseTurn;
         DrawTile(s, true);
     }
 
-    /// Opens a ron-only call window on a tile just added to a kan. Returns false (changing nothing) if nobody can ron it.
-    bool OpenChankanWindow(int s, int id)
+    /// Opens a ron-only call window on a tile just added to a kan (or set aside as kita). Returns false (changing
+    /// nothing) if nobody can ron it.
+    bool OpenChankanWindow(int s, int id, bool kita)
     {
         int prevDiscard = lastDiscard;
         int prevDiscarder = lastDiscarder;
         lastDiscard = id;
         lastDiscarder = s;
         chankan = true;
+        robKita = kita;
         bool any = false;
-        for (int o = 0; o < 4; o++)
+        for (int o = 0; o < Seats(); o++)
         {
             int opts = 0;
             if (o != s)
@@ -1017,6 +1087,7 @@ public class MahjongGame : UdonSharpBehaviour
         if (!any)
         {
             chankan = false;
+            robKita = false;
             lastDiscard = prevDiscard;
             lastDiscarder = prevDiscarder;
             return false;
@@ -1024,6 +1095,57 @@ public class MahjongGame : UdonSharpBehaviour
         phase = PhaseCalls;
         if (callWindowSeconds > 0f) StartTimer(callWindowSeconds);
         return true;
+    }
+
+    /// 3-player: on your turn after a draw, a North in hand can be set aside as a dora for a replacement tile.
+    /// In riichi only a freshly drawn North can go.
+    bool CanKita(int s)
+    {
+        if (!threePlayer || phase != PhaseTurn || s != turn || drawn[s] < 0 || kitaCount[s] >= 4) return false;
+        if (Remaining() <= 0 || rinshanCount >= 8) return false;
+        if (riichi[s]) return drawn[s] / 4 == NorthType;
+        return SlotOfType(s, NorthType) >= 0;
+    }
+
+    void DoKita(int s)
+    {
+        if (!CanKita(s)) return;
+        int id = drawn[s] / 4 == NorthType ? drawn[s] : hands[s * HandSlots + SlotOfType(s, NorthType)];
+        hands[s * HandSlots + SlotOf(s, id)] = -1;
+        kitaIds[s * 4 + kitaCount[s]] = id;
+        kitaCount[s]++;
+        drawn[s] = -1;
+        canTsumo = false;
+        firstTurn[s] = false;
+        lastEvent = SeatName(s) + " set aside a North (kita).";
+        Announce("<color=#a0e0ff>KITA!</color>", s, KindKita, "");
+        // Anyone waiting on North may ron it, like robbing a kan (but without the chankan yaku).
+        if (OpenChankanWindow(s, id, true)) { Commit(); return; }
+        FinishAddedKan(s);
+        Commit();
+    }
+
+    /// A ron on a kita takes the North back out of the set-aside row.
+    void UndoKita(int s, int id)
+    {
+        int n = 0;
+        for (int k = 0; k < kitaCount[s]; k++)
+        {
+            int x = kitaIds[s * 4 + k];
+            kitaIds[s * 4 + k] = -1;
+            if (x != id) kitaIds[s * 4 + n++] = x;
+        }
+        kitaCount[s] = n;
+    }
+
+    int SlotOfType(int s, int t)
+    {
+        for (int k = 0; k < HandSlots; k++)
+        {
+            int id = hands[s * HandSlots + k];
+            if (id >= 0 && id / 4 == t) return k;
+        }
+        return -1;
     }
 
     bool CanNineTerminals(int s)
@@ -1061,7 +1183,7 @@ public class MahjongGame : UdonSharpBehaviour
 
         int b = rules.resultBase;
         int total = 0;
-        for (int o = 0; o < 4; o++)
+        for (int o = 0; o < Seats(); o++)
         {
             if (o == s) continue;
             int pay = rules.RoundUp100(b * ((s == dealer || o == dealer) ? 2 : 1)) + 100 * honba;
@@ -1083,13 +1205,14 @@ public class MahjongGame : UdonSharpBehaviour
         Evaluate(s, lastDiscard, lastDiscard, false);
         winSeat = s;
         winTile = lastDiscard;
-        if (chankan) UndoAddedKan(lastDiscarder, lastDiscard);
+        if (chankan && robKita) UndoKita(lastDiscarder, lastDiscard);
+        else if (chankan) UndoAddedKan(lastDiscarder, lastDiscard);
         int pay = rules.RoundUp100(rules.resultBase * (s == dealer ? 6 : 4)) + 300 * honba;
         scores[lastDiscarder] -= pay;
         scores[s] += pay + riichiSticks * 1000;
         int total = pay + riichiSticks * 1000;
         riichiSticks = 0;
-        lastEvent = SeatName(s) + " wins by RON" + (chankan ? " (robbing the kan)" : "") + " from " + SeatName(lastDiscarder) + "! " + ResultLine() + " (+" + total + ")";
+        lastEvent = SeatName(s) + " wins by RON" + (chankan ? (robKita ? " (on a kita)" : " (robbing the kan)") : "") + " from " + SeatName(lastDiscarder) + "! " + ResultLine() + " (+" + total + ")";
         Announce("<color=#ff7755>RON!</color>", s, KindRon, WinSubLine(total));
         EndHand(s == dealer, false);
     }
@@ -1117,11 +1240,13 @@ public class MahjongGame : UdonSharpBehaviour
     {
         bool[] tenpai = new bool[4];
         int n = 0;
-        for (int s = 0; s < 4; s++)
+        int seats = Seats();
+        drawTenpai = 0;
+        for (int s = 0; s < seats; s++)
         {
             CountClosed(s, tc);
             tenpai[s] = riichi[s] || rules.IsTenpai(tc, meldCount[s]);
-            if (tenpai[s]) n++;
+            if (tenpai[s]) { n++; drawTenpai |= 1 << s; }
         }
         if (nagashiMangan && PayNagashi())
         {
@@ -1129,15 +1254,15 @@ public class MahjongGame : UdonSharpBehaviour
             return;
         }
         string names = "";
-        if (n > 0 && n < 4)
+        if (n > 0 && n < seats)
         {
-            for (int s = 0; s < 4; s++)
+            for (int s = 0; s < seats; s++)
             {
                 if (tenpai[s]) { scores[s] += 3000 / n; names += (names.Length > 0 ? ", " : "") + SeatName(s); }
-                else scores[s] -= 3000 / (4 - n);
+                else scores[s] -= 3000 / (seats - n);
             }
         }
-        lastEvent = "Exhaustive draw. Tenpai: " + (n == 0 ? "nobody" : (n == 4 ? "everyone" : names)) + ".";
+        lastEvent = "Exhaustive draw. Tenpai: " + (n == 0 ? "nobody" : (n == seats ? "everyone" : names)) + ".";
         Announce("<color=#a0c8ff>DRAW</color>", -1, KindDraw, "");
         EndHand(tenpai[dealer], true);
     }
@@ -1148,7 +1273,7 @@ public class MahjongGame : UdonSharpBehaviour
     {
         string names = "";
         int who = -1;
-        for (int s = 0; s < 4; s++)
+        for (int s = 0; s < Seats(); s++)
         {
             if (discardCount[s] == 0) continue;
             bool ok = true;
@@ -1159,7 +1284,7 @@ public class MahjongGame : UdonSharpBehaviour
             }
             if (!ok) continue;
             who = s;
-            for (int o = 0; o < 4; o++)
+            for (int o = 0; o < Seats(); o++)
             {
                 if (o == s) continue;
                 int pay = (s == dealer || o == dealer) ? 4000 : 2000;
@@ -1181,7 +1306,7 @@ public class MahjongGame : UdonSharpBehaviour
         pendingRiichi = -1;
         bool bust = false;
         for (int s = 0; s < 4; s++) if (scores[s] < 0) bust = true;
-        bool lastHand = roundWind >= gameLength - 1 && kyoku >= 3;
+        bool lastHand = roundWind >= gameLength - 1 && kyoku >= Seats() - 1;
         if (bust || (lastHand && !dealerKeeps))
         {
             phase = PhaseGameOver;
@@ -1202,9 +1327,11 @@ public class MahjongGame : UdonSharpBehaviour
     bool Evaluate(int s, int extraId, int winId, bool tsumo)
     {
         bool last = Remaining() <= 0 && !(tsumo && afterKan);
+        rules.sanma = threePlayer;
+        rules.kitaCount = threePlayer ? kitaCount[s] : 0;
         return rules.EvaluateWin(hands, s * HandSlots, extraId, melds, meldKinds, s, meldCount[s],
             winId, tsumo, SeatWind(s), roundWind, riichi[s], ippatsu[s], last, tsumo && afterKan, wall, 1 + kanCount,
-            doubleRiichi[s], tsumo && firstTurn[s], chankan && !tsumo);
+            doubleRiichi[s], tsumo && firstTurn[s], chankan && !robKita && !tsumo);
     }
 
     string ResultLine()
@@ -1255,12 +1382,33 @@ public class MahjongGame : UdonSharpBehaviour
 
     int Remaining()
     {
-        return LiveWallEnd - kanCount - wallPos;
+        return LiveWallEnd - rinshanCount - wallPos;
+    }
+
+    int Seats()
+    {
+        return threePlayer ? 3 : 4;
+    }
+
+    int NextSeat(int s)
+    {
+        return (s + 1) % Seats();
+    }
+
+    int WallStart()
+    {
+        return threePlayer ? SanmaWallStart : 0;
+    }
+
+    /// 3-player has no 2m-8m.
+    bool RemovedType(int t)
+    {
+        return threePlayer && t >= 1 && t <= 7;
     }
 
     int SeatWind(int s)
     {
-        return (s - dealer + 4) % 4;
+        return (s - dealer + Seats()) % Seats();
     }
 
     void CountClosed(int s, int[] c)
@@ -1323,7 +1471,7 @@ public class MahjongGame : UdonSharpBehaviour
     int SeatedCount()
     {
         int n = 0;
-        for (int s = 0; s < 4; s++) if (seatPlayers[s] != -1) n++;
+        for (int s = 0; s < Seats(); s++) if (seatPlayers[s] != -1) n++;
         return n;
     }
 
@@ -1370,9 +1518,9 @@ public class MahjongGame : UdonSharpBehaviour
     int CallSeat(int opt)
     {
         if (phase != PhaseCalls) { Hint("There's nothing to call right now."); return -1; }
-        for (int i = 1; i < 4; i++)
+        for (int i = 1; i < Seats(); i++)
         {
-            int s = (lastDiscarder + i) % 4;
+            int s = (lastDiscarder + i) % Seats();
             if (callResponse[s] != RespPending || !ControlsSeat(s)) continue;
             if (opt == 0 || (callOptions[s] & opt) != 0) return s;
         }
@@ -1397,10 +1545,10 @@ public class MahjongGame : UdonSharpBehaviour
     {
         bool[] done = new bool[4];
         string text = "";
-        for (int place = 1; place <= 4; place++)
+        for (int place = 1; place <= Seats(); place++)
         {
             int best = -1;
-            for (int s = 0; s < 4; s++) if (!done[s] && (best < 0 || scores[s] > scores[best])) best = s;
+            for (int s = 0; s < Seats(); s++) if (!done[s] && (best < 0 || scores[s] > scores[best])) best = s;
             done[best] = true;
             text += (place > 1 ? "  " : "") + place + ". " + SeatName(best) + " " + scores[best];
         }
@@ -1420,7 +1568,7 @@ public class MahjongGame : UdonSharpBehaviour
     {
         if (!autoDiscardInRiichi || !Networking.IsOwner(gameObject)) return;
         if (phase != PhaseTurn || IsBot(turn) || !riichi[turn] || drawn[turn] < 0) return;
-        int key = wallPos * 8 + kanCount;
+        int key = wallPos * 16 + rinshanCount;
         if (key == autoDiscardKey) return;
         autoDiscardKey = key;
         SendCustomEventDelayedSeconds(nameof(_AutoDiscard), autoDiscardSeconds > 0f ? autoDiscardSeconds : 0.05f);
@@ -1430,9 +1578,10 @@ public class MahjongGame : UdonSharpBehaviour
     {
         if (!Networking.IsOwner(gameObject)) return;
         if (phase != PhaseTurn || IsBot(turn) || !riichi[turn] || drawn[turn] < 0) return;
-        if (wallPos * 8 + kanCount != autoDiscardKey) return;
+        if (wallPos * 16 + rinshanCount != autoDiscardKey) return;
         CountClosed(turn, tc);
         if (rules.IsCompleteShape(tc, meldCount[turn]) && Evaluate(turn, -1, drawn[turn], true)) return; // their call: Tsumo
+        if (CanKita(turn)) { DoKita(turn); return; }   // a drawn North is set aside rather than thrown
         DoDiscard(turn, drawn[turn], false);
     }
 
@@ -1473,9 +1622,9 @@ public class MahjongGame : UdonSharpBehaviour
         if (phase == PhaseTurn) return IsBot(turn) ? turn : -1;
         if (phase == PhaseCalls)
         {
-            for (int i = 1; i < 4; i++)
+            for (int i = 1; i < Seats(); i++)
             {
-                int s = (lastDiscarder + i) % 4;
+                int s = (lastDiscarder + i) % Seats();
                 if (callResponse[s] == RespPending && IsBot(s)) return s;
             }
         }
@@ -1494,6 +1643,12 @@ public class MahjongGame : UdonSharpBehaviour
         if (CanNineTerminals(s) && TermHonorKinds() < 11)
         {
             DoNineTerminals(s);
+            return;
+        }
+        // North has no yaku in 3-player, so it's always worth more as kita.
+        if (CanKita(s))
+        {
+            DoKita(s);
             return;
         }
         CountClosed(s, tc);
@@ -1743,7 +1898,8 @@ public class MahjongGame : UdonSharpBehaviour
             }
         }
         for (int d = 0; d < 1 + kanCount; d++) botUnseen[wall[122 + d] / 4]--;
-        for (int x = 0; x < 34; x++) if (botUnseen[x] < 0) botUnseen[x] = 0;
+        for (int k = 0; k < 16; k++) if (kitaIds[k] >= 0) botUnseen[kitaIds[k] / 4]--;
+        for (int x = 0; x < 34; x++) if (botUnseen[x] < 0 || RemovedType(x)) botUnseen[x] = 0;
     }
 
     /// Fills botDanger (riichi players count double, players with 3+ open melds count once) and returns
@@ -1882,6 +2038,7 @@ public class MahjongGame : UdonSharpBehaviour
             RefreshMelds(s, inHand);
             RefreshLabel(s, inHand);
             RefreshWaits(s, inHand);
+            RefreshKita(s, inHand);
         }
 
         if (doraTiles != null)
@@ -1986,7 +2143,13 @@ public class MahjongGame : UdonSharpBehaviour
     /// True if a face-up tile with this id is worth dora right now (a red five, or matches a revealed indicator).
     public bool IsDoraId(int id)
     {
-        if (!showDoraShine || id < 0 || rules == null) return false;
+        return showDoraShine && IsDoraNow(id);
+    }
+
+    /// True if this tile id is worth dora right now (a red five, or matches a revealed indicator).
+    bool IsDoraNow(int id)
+    {
+        if (id < 0 || rules == null) return false;
         if (rules.IsAka(id)) return true;
         if (phase == PhaseLobby) return false;
         int t = id / 4;
@@ -2002,6 +2165,7 @@ public class MahjongGame : UdonSharpBehaviour
         AddShining(discardTiles);
         AddShining(meldTiles);
         AddShining(waitTiles);
+        AddShining(kitaTiles);
         if (announceTile != null && announceTile.shining && shineCount < shineList.Length) shineList[shineCount++] = announceTile;
     }
 
@@ -2032,6 +2196,7 @@ public class MahjongGame : UdonSharpBehaviour
         else if (code == BtnNext) ActNextHand();
         else if (code == BtnReset) ActReset();
         else if (code == BtnNineTerminals) ActRedeal();
+        else if (code == BtnKita) ActDeclareKita();
     }
 
     void UpdateButtons()
@@ -2040,7 +2205,7 @@ public class MahjongGame : UdonSharpBehaviour
         for (int s = 0; s < 4; s++)
         {
             slotFill = 0;
-            if (ControlsSeat(s)) AddSeatButtons(s);
+            if (s < Seats() && ControlsSeat(s)) AddSeatButtons(s);
             for (int k = slotFill; k < ButtonSlots; k++) SetSlot(s, k, BtnNone, 0, "");
         }
     }
@@ -2060,6 +2225,7 @@ public class MahjongGame : UdonSharpBehaviour
             if (hintTsumo) AddButton(s, BtnTsumo, 0, "Tsumo");
             if (AnyHint(hintRiichi)) AddButton(s, BtnRiichi, 0, riichiArmed ? "Cancel Riichi" : "Riichi");
             for (int t = 0; t < 34; t++) if (hintKan[t]) AddButton(s, BtnOwnKan, t, "Kan " + TypeName(t));
+            if (CanKita(s)) AddButton(s, BtnKita, 0, "Kita");
             if (CanNineTerminals(s)) AddButton(s, BtnNineTerminals, 0, "9 Terminals: Redeal");
             return;
         }
@@ -2143,8 +2309,21 @@ public class MahjongGame : UdonSharpBehaviour
             if (announceKind == KindRon) PlaySound(ronSound, 1f);
             else if (announceKind == KindTsumo) PlaySound(tsumoSound, 1f);
             else if (announceKind == KindRiichi) PlaySound(riichiSound, 1f);
-            else if (announceKind == KindCall) PlaySound(callSound, 1f);
-            else if (announceKind == KindDraw) PlaySound(drawGameSound, 1f);
+            else if (announceKind == KindDoubleRiichi) PlaySound(doubleRiichiSound != null ? doubleRiichiSound : riichiSound, 1f);
+            else if (announceKind == KindChi) PlaySound(chiSound, 1f);
+            else if (announceKind == KindPon) PlaySound(ponSound, 1f);
+            else if (announceKind == KindKan) PlaySound(kanSound, 1f);
+            else if (announceKind == KindKita) PlaySound(kitaSound, 1f);
+            else if (announceKind == KindDraw)
+            {
+                PlaySound(drawGameSound, 1f);
+                if (drawTenpai >= 0 && (tenpaiSound != null || notenSound != null))
+                {
+                    drawVoiceStep = 0;
+                    drawVoiceSerial = announceSerial;
+                    SendCustomEventDelayedSeconds(nameof(_DrawVoice), 0.9f);
+                }
+            }
         }
 
         // The last discard, shown large while it's still on the table (it lights up if you can call it).
@@ -2157,6 +2336,16 @@ public class MahjongGame : UdonSharpBehaviour
             else announceTile.Hide();
         }
         if (announceCaption != null) announceCaption.text = show ? SeatName(lastDiscarder) + (chankan ? " added to a kan" : " discarded") : "";
+    }
+
+    /// Local: after an exhaustive draw, each seat's "tenpai" or "no-ten" in turn, dealer first.
+    public void _DrawVoice()
+    {
+        if (drawVoiceSerial != announceSerial || drawTenpai < 0 || drawVoiceStep >= Seats()) return;
+        int s = (dealer + drawVoiceStep) % Seats();
+        PlaySound((drawTenpai & (1 << s)) != 0 ? tenpaiSound : notenSound, 1f);
+        drawVoiceStep++;
+        if (drawVoiceStep < Seats()) SendCustomEventDelayedSeconds(nameof(_DrawVoice), 0.8f);
     }
 
     // ================= sounds =================
@@ -2182,6 +2371,7 @@ public class MahjongGame : UdonSharpBehaviour
             AudioClip clip = discardSounds[Random.Range(0, discardSounds.Length)];
             PlaySound(clip, 1f + Random.Range(-discardPitchVariation, discardPitchVariation));
         }
+        if (total > heardDiscards && IsDoraNow(lastDiscard)) PlaySound(doraDiscardSound, 1f);
         heardDiscards = total;
     }
 
@@ -2195,7 +2385,7 @@ public class MahjongGame : UdonSharpBehaviour
         int n = 0;
         string caption = "";
         bool live = phase == PhaseTurn || phase == PhaseCalls || phase == PhasePause;
-        if (showWaits && inHand && live && rules != null && ControlsSeat(s))
+        if (showWaits && inHand && live && rules != null && s < Seats() && ControlsSeat(s))
         {
             CountClosed(s, tc);
             int closed = 0;
@@ -2277,6 +2467,19 @@ public class MahjongGame : UdonSharpBehaviour
             }
         }
         for (int d = 0; d < 1 + kanCount; d++) visibleCount[wall[122 + d] / 4]++;
+        for (int k = 0; k < 16; k++) if (kitaIds[k] >= 0) visibleCount[kitaIds[k] / 4]++;
+    }
+
+    void RefreshKita(int s, bool inHand)
+    {
+        if (kitaTiles == null) return;
+        for (int k = 0; k < 4; k++)
+        {
+            int i = s * 4 + k;
+            if (i >= kitaTiles.Length || kitaTiles[i] == null) continue;
+            if (inHand && k < kitaCount[s]) kitaTiles[i].ShowFace(kitaIds[i], 0);
+            else kitaTiles[i].Hide();
+        }
     }
 
     bool InOwnPond(int s, int t)
@@ -2358,7 +2561,7 @@ public class MahjongGame : UdonSharpBehaviour
     /// Works out which tiles to light up on the local player's turn: tsumo, kan and riichi discards.
     void UpdateTurnHints()
     {
-        int key = ((((turn * 200 + wallPos) * 8 + kanCount) * 8 + meldCount[turn]) * 136) + wall[0];
+        int key = ((((turn * 200 + wallPos) * 16 + rinshanCount) * 8 + meldCount[turn]) * 136) + kitaCount[turn];
         if (key == hintKey) return;
         hintKey = key;
         for (int x = 0; x < 34; x++) { hintRiichi[x] = false; hintKan[x] = false; }
@@ -2451,10 +2654,10 @@ public class MahjongGame : UdonSharpBehaviour
 
     string BuildStatus()
     {
-        string s = "<b>RIICHI MAHJONG</b>";
+        string s = threePlayer ? "<b>RIICHI MAHJONG</b>  <size=70%>3 players</size>" : "<b>RIICHI MAHJONG</b>";
         if (phase == PhaseLobby)
         {
-            s += "\nClick Sit (or Bot) at each seat, then Start. (" + SeatedCount() + "/4 seated)";
+            s += "\nClick Sit (or Bot) at each seat, then Start. (" + SeatedCount() + "/" + Seats() + " seated)";
         }
         else
         {
@@ -2470,20 +2673,21 @@ public class MahjongGame : UdonSharpBehaviour
                     if (AnyHint(hintRiichi)) s += "\n<color=#66ff66>Riichi possible: Riichi, then a green tile.</color>";
                     if (AnyHint(hintKan)) s += "\n<color=#66ff66>Kan possible.</color>";
                     if (CanNineTerminals(turn)) s += "\n<color=#a0c8ff>Nine terminals: you may call a redeal.</color>";
+                    if (CanKita(turn)) s += "\n<color=#a0e0ff>Kita: set your North aside as a dora.</color>";
                     if (riichiArmed) s += " <color=#ff6666>Riichi armed.</color>";
                 }
             }
             else if (phase == PhaseCalls)
             {
-                s += "\nWaiting on calls for " + SeatName(lastDiscarder) + (chankan ? "'s kan (anyone waiting on it may rob it)" : "'s discard") + CountdownText() + ".";
-                for (int i = 1; i < 4; i++)
+                s += "\nWaiting on calls for " + SeatName(lastDiscarder) + (chankan ? (robKita ? "'s North (anyone waiting on it may ron)" : "'s kan (anyone waiting on it may rob it)") : "'s discard") + CountdownText() + ".";
+                for (int i = 1; i < Seats(); i++)
                 {
-                    int c = (lastDiscarder + i) % 4;
+                    int c = (lastDiscarder + i) % Seats();
                     if (callResponse[c] != RespPending || !ControlsSeat(c)) continue;
                     s += "\n<color=#66ff66>" + SeatName(c) + " can: " + OptionText(callOptions[c]) + " or Pass</color>";
                 }
             }
-            else if (phase == PhasePause) s += "\n" + SeatName((lastDiscarder + 1) % 4) + " draws next...";
+            else if (phase == PhasePause) s += "\n" + SeatName(NextSeat(lastDiscarder)) + " draws next...";
             else if (phase == PhaseHandOver) s += nextHandSeconds > 0f ? "\nNext hand in " + Seconds() + "s (or press Next Hand)." : "\nHand over. Press Next Hand.";
             else if (phase == PhaseGameOver) s += "\nPress Start for a new game.";
         }
@@ -2496,7 +2700,7 @@ public class MahjongGame : UdonSharpBehaviour
     string ScoreLine()
     {
         string line = "";
-        for (int s = 0; s < 4; s++)
+        for (int s = 0; s < Seats(); s++)
         {
             string part = windNames[SeatWind(s)].Substring(0, 1) + " " + SeatName(s) + " " + scores[s] + (riichi[s] ? " (R)" : "");
             if (s == LocalSeat()) part = "<color=#ffdd33>" + part + "</color>";

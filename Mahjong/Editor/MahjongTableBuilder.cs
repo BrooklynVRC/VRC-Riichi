@@ -5,8 +5,9 @@ using UnityEditor;
 using TMPro;
 using UdonSharpEditor;
 
-/// Menu: Tools > Mahjong > Build Table
-/// Builds a complete, wired-up riichi mahjong table at the world origin.
+/// Menu: Tools > Mahjong > Build Table (4 players, at the world origin)
+///       Tools > Mahjong > Build 3-Player Table (sanma, beside it)
+/// Builds a complete, wired-up riichi mahjong table.
 public static class MahjongTableBuilder
 {
 
@@ -26,7 +27,21 @@ public static class MahjongTableBuilder
     [MenuItem("Tools/Mahjong/Build Table")]
     public static void Build()
     {
-        var root = new GameObject("MahjongTable");
+        BuildTable(false);
+    }
+
+    /// Same table with the fourth seat left out, threePlayer on, and a row for set-aside Norths (kita) per seat.
+    [MenuItem("Tools/Mahjong/Build 3-Player Table")]
+    public static void Build3Player()
+    {
+        BuildTable(true);
+    }
+
+    static void BuildTable(bool threePlayer)
+    {
+        var root = new GameObject(threePlayer ? "MahjongTable3P" : "MahjongTable");
+        // The 3-player table goes beside the 4-player one so both fit in the same world.
+        if (threePlayer) root.transform.position = new Vector3(TableHalf * 2f + 1.5f, 0, 0);
         Undo.RegisterCreatedObjectUndo(root, "Build Mahjong Table");
         var game = UdonSharpUndo.AddComponent<MahjongGame>(root);
         var rules = UdonSharpUndo.AddComponent<MahjongRules>(root);
@@ -79,10 +94,12 @@ public static class MahjongTableBuilder
         var meldTiles = new MahjongTile[64];
         var waitTiles = new MahjongTile[4 * MahjongGame.WaitSlots];
         var waitLabels = new TMP_Text[4];
+        var kitaTiles = new MahjongTile[16];
         var flat = Quaternion.Euler(90, 0, 0);
         float flatY = TableY + TileSize.z * 0.5f;
 
-        for (int s = 0; s < 4; s++)
+        // 3-player: seat 4 (the North side) is left empty; its array entries stay null.
+        for (int s = 0; s < (threePlayer ? 3 : 4); s++)
         {
             // Each seat is built in local space: player at -Z looking toward +Z. Seats go counter-clockwise.
             var anchor = new GameObject("Seat" + (s + 1)).transform;
@@ -152,6 +169,16 @@ public static class MahjongTableBuilder
                 meldTiles[s * 16 + k] = Tile("Meld" + k, meldGroup, pos, flat, game, s, k, true);
             }
 
+            // Kita (3-player): set-aside Norths in a row just left of the melds, turning with them.
+            if (threePlayer)
+            {
+                for (int k = 0; k < 4; k++)
+                {
+                    var pos = new Vector3(0.47f * S - 0.02f - (4 - k) * Pitch - meldX, 0f, -0.78f * S - meldZ);
+                    kitaTiles[s * 4 + k] = Tile("Kita" + k, meldGroup, pos, flat, game, s, k, true);
+                }
+            }
+
             // Context buttons: the game fills them left to right with only the choices available right now.
             for (int b = 0; b < MahjongGame.ButtonSlots; b++)
             {
@@ -188,6 +215,12 @@ public static class MahjongTableBuilder
         sfx.rolloffMode = AudioRolloffMode.Linear;
 
         game.rules = rules;
+        game.threePlayer = threePlayer;
+        if (threePlayer)
+        {
+            game.kitaTiles = kitaTiles;
+            game.startingPoints = 35000;
+        }
         game.waitTiles = waitTiles;
         game.waitLabels = waitLabels;
         game.sfxSource = sfx;
@@ -235,6 +268,7 @@ public static class MahjongTableBuilder
             ApplyTiles(game.meldTiles, game);
             ApplyTiles(game.doraTiles, game);
             ApplyTiles(game.waitTiles, game);
+            ApplyTiles(game.kitaTiles, game);
             ApplyRenderers(game.tableRenderers, game.tableMaterial);
             ApplyRenderers(game.buttonRenderers, game.buttonMaterial);
             ApplyRenderers(game.sitButtonRenderers, game.sitButtonMaterial);
