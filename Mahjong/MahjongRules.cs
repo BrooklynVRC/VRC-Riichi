@@ -23,6 +23,10 @@ public class MahjongRules : UdonSharpBehaviour
     [System.NonSerialized] public int resultBase;
     [System.NonSerialized] public string resultText = "";
 
+    // ---- set by the game before evaluating ----
+    [System.NonSerialized] public bool sanma;       // 3-player: 1m indicates 9m (2m-8m aren't in the wall)
+    [System.NonSerialized] public int kitaCount;    // Norths the winner set aside (3-player): one dora each
+
     // ---- evaluation state ----
     int[] cnt = new int[34];      // closed tiles still to decompose
     int[] all = new int[34];      // every tile in the hand, melds included
@@ -48,6 +52,7 @@ public class MahjongRules : UdonSharpBehaviour
     int heavenly;          // 1 tenhou (dealer's first draw), 2 chiihou (non-dealer's first draw, no calls yet)
     bool robbedKan;        // chankan
     int doraHan;
+    int kitaHan;
 
     int bestBase;
     int bestHan;
@@ -240,7 +245,11 @@ public class MahjongRules : UdonSharpBehaviour
         {
             doraHan += all[DoraFromIndicator(wall[122 + d] / 4)];
             if (riichi) doraHan += all[DoraFromIndicator(wall[127 + d] / 4)];
+            // Set-aside Norths also count when North is a dora.
+            if (DoraFromIndicator(wall[122 + d] / 4) == 30) doraHan += kitaCount;
+            if (riichi && DoraFromIndicator(wall[127 + d] / 4) == 30) doraHan += kitaCount;
         }
+        kitaHan = kitaCount;
 
         bestBase = 0;
         bestHan = 0;
@@ -464,8 +473,9 @@ public class MahjongRules : UdonSharpBehaviour
             if (fu < 30) fu = 30;
         }
 
-        han += doraHan;
+        han += doraHan + kitaHan;
         if (doraHan > 0) text = Add(text, "Dora", doraHan);
+        if (kitaHan > 0) text = Add(text, "Kita", kitaHan);
         Consider(BasePoints(han, fu), han, fu, 0, text);
     }
 
@@ -495,8 +505,9 @@ public class MahjongRules : UdonSharpBehaviour
         if (allTermHonor) { han += 2; text = Add(text, "Honroutou", 2); }
         if (suits == 1 && !hasHonor) { han += 6; text = Add(text, "Chinitsu", 6); }
         else if (suits == 1) { han += 3; text = Add(text, "Honitsu", 3); }
-        han += doraHan;
+        han += doraHan + kitaHan;
         if (doraHan > 0) text = Add(text, "Dora", doraHan);
+        if (kitaHan > 0) text = Add(text, "Kita", kitaHan);
         Consider(BasePoints(han, 25), han, 25, 0, text);
     }
 
@@ -854,6 +865,8 @@ public class MahjongRules : UdonSharpBehaviour
 
     public int DoraFromIndicator(int t)
     {
+        if (sanma && t == 0) return 8;
+        if (sanma && t == 8) return 0;
         if (t < 27) return (t % 9 == 8) ? t - 8 : t + 1;
         if (t <= 30) return t == 30 ? 27 : t + 1;
         return t == 33 ? 31 : t + 1;
