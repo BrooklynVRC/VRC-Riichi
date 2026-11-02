@@ -14,14 +14,16 @@ A networked riichi mahjong table for VRChat worlds, written in UdonSharp, for 4 
   - an extra sound when someone discards a dora
   - ron, tsumo, riichi and double riichi
   - chi, pon, kan and kita
-  - the draw itself, then each seat's tenpai or no-ten in turn
+  - the draw itself, then one tenpai voice for the table if anyone was ready, or no-ten if nobody was
 - In riichi, your drawn tile is discarded for you when you can't win on it (`autoDiscardInRiichi`).
 - Each tile shows its number (or wind) in the corner of the picture. Turn it off with `showTileNumbers`.
 - Context buttons: only the moves you can make right now appear, such as Tsumo, Riichi, Ron, Pon, Pass, or one Chi button per sequence (Chi 3-4-5m). Nothing appears when you just need to discard.
 - Dora tiles and red fives glow with a slow golden pulse (`showDoraShine`, plus color and speed settings). It uses material emission, so a custom tile material needs emission for the glow to show.
 - Readable table: on your screen, every other player's discards and called sets, plus the dora indicators, turn to face you and tilt up like a display stand. Your own stay flat. Each player sees the table turned toward themselves; it's visual only, so the game state isn't affected. Tilt, size and on/off settings are in the Readable discards section.
 - Tiles you can claim light up, and a timed call window gives you time to decide before play moves on.
-- A large announcer above the table shows the last discard and calls such as PON!, RIICHI! and RON!. Wins show the hand's value and stay up longer. When the hand ends, the winner's hand is revealed with the winning tile lit up.
+- A large announcer above the table shows the last discard and calls such as PON!, RIICHI! and RON!. Wins show the hand's value and stay up longer.
+- **End of hand:** the winning hand appears large above the table, facing every player: the closed tiles, the winning tile set apart and lit, then the called sets, with the yaku and value underneath. Point sticks then fly from the players who paid to the players who got paid (riichi sticks fly out from the middle), each seat shows its +/- for the hand, and the scores on the name tags count over. The settings are in the End of hand section (`showWinningHand`, `animatePoints`).
+- Seat markers: each seat has its wind on a plaque on the table (gold with DEALER for the dealer), and a riichi stick lies in front of the pond of anyone in riichi.
 - **Bots:** they discard by shanten and tile acceptance, keep dora, red fives and honor pairs, and declare riichi on good waits while avoiding furiten. They only call when it speeds up a hand that keeps a yaku (yakuhai, tanyao or honitsu). Against riichi they push when close to ready and fold otherwise, using safe tiles, suji and visible honors. If a player leaves mid-game, a bot takes over their seat.
 - The next hand starts on its own after a short countdown, so bot games keep flowing. You can change the countdown or turn it off.
 - Material slots on the game object let you restyle the table, tiles, tile backs, tile faces and buttons.

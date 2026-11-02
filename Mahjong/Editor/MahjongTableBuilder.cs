@@ -85,6 +85,21 @@ public static class MahjongTableBuilder
         announceText.outlineWidth = 0.2f;
         announceText.outlineColor = new Color32(0, 0, 0, 255);
 
+        // Winning hand at hand over: one row of tiles where the big discard tile sits, the yaku underneath.
+        // The game spaces the tiles out (with gaps before the winning tile and each called set).
+        const float WinScale = 1.3f;
+        var winTiles = new MahjongTile[18];
+        for (int k = 0; k < winTiles.Length; k++)
+        {
+            var wt = Tile("WinTile" + k, announceAnchor, new Vector3(0, 0.08f, 0), Quaternion.identity, game, 0, k, true);
+            wt.transform.localScale = Vector3.one * WinScale;
+            winTiles[k] = wt;
+        }
+        var winText = Text("WinText", announceAnchor, new Vector3(0, 0.08f - TileSize.y * WinScale * 0.5f - 0.06f, 0), Quaternion.identity, 0.55f, new Vector2(1.8f, 0.1f), new Color(1f, 0.9f, 0.6f), true);
+        winText.text = "";
+        winText.outlineWidth = 0.2f;
+        winText.outlineColor = new Color32(0, 0, 0, 255);
+
         var seatLabels = new TMP_Text[4];
         var actionButtons = new MahjongButton[4 * MahjongGame.ButtonSlots];
         var pondAnchors = new Transform[4];
@@ -95,6 +110,9 @@ public static class MahjongTableBuilder
         var waitTiles = new MahjongTile[4 * MahjongGame.WaitSlots];
         var waitLabels = new TMP_Text[4];
         var kitaTiles = new MahjongTile[16];
+        var deltaLabels = new TMP_Text[4];
+        var windMarkers = new TMP_Text[4];
+        var riichiSticks = new GameObject[4];
         var flat = Quaternion.Euler(90, 0, 0);
         float flatY = TableY + TileSize.z * 0.5f;
 
@@ -118,6 +136,35 @@ public static class MahjongTableBuilder
 
             // Name tag above and behind the player, facing the table: readable by the others, out of the player's own view.
             seatLabels[s] = Text("SeatLabel", anchor, new Vector3(0, TableY + 1.3f, -1.75f * S), Quaternion.Euler(0, 180, 0), 1.0f, new Vector2(1.4f, 0.35f), Color.white, false);
+
+            // Points won or lost this hand, floating over this side of the table (billboards toward the viewer).
+            // Point sticks fly to and from the spot under it.
+            deltaLabels[s] = Text("PointsDelta", anchor, new Vector3(0, TableY + 0.3f, -0.72f * S), Quaternion.identity, 1.2f, new Vector2(0.6f, 0.15f), Color.white, false);
+            deltaLabels[s].text = "";
+            deltaLabels[s].fontStyle = FontStyles.Bold;
+            deltaLabels[s].outlineWidth = 0.2f;
+            deltaLabels[s].outlineColor = new Color32(0, 0, 0, 255);
+
+            // Seat wind marker: a plaque on the table left of the hand, with the wind standing over it
+            // (billboards toward the viewer; gold with DEALER for the dealer).
+            var plaque = Prim(PrimitiveType.Cube, "WindPlaque", anchor, new Vector3(-0.6f * S, TableY + 0.004f, -0.8f * S), Quaternion.identity, new Vector3(0.09f, 0.008f, 0.09f) * S);
+            Object.DestroyImmediate(plaque.GetComponent<Collider>());
+            plaque.GetComponent<Renderer>().sharedMaterial = GetOrCreateMaterial("MJ_WindMarker", new Color(0.12f, 0.12f, 0.14f));
+            windMarkers[s] = Text("WindMarker", anchor, new Vector3(-0.6f * S, TableY + 0.1f, -0.8f * S), Quaternion.identity, 0.7f, new Vector2(0.4f, 0.14f), Color.white, false);
+            windMarkers[s].text = "";
+            windMarkers[s].fontStyle = FontStyles.Bold;
+            windMarkers[s].outlineWidth = 0.2f;
+            windMarkers[s].outlineColor = new Color32(0, 0, 0, 255);
+
+            // Riichi stick: laid across the table just inside the pond while this seat is in riichi.
+            var rs = Prim(PrimitiveType.Cube, "RiichiStick", anchor, new Vector3(0, TableY + 0.005f, -0.33f * S + TileSize.y * 0.5f + 0.02f), Quaternion.Euler(0, 90, 0), new Vector3(0.018f, 0.008f, 0.1f) * S * 1.4f);
+            Object.DestroyImmediate(rs.GetComponent<Collider>());
+            rs.GetComponent<Renderer>().sharedMaterial = GetOrCreateMaterial("MJ_PointStick", new Color(0.97f, 0.97f, 0.95f));
+            var rsDot = Prim(PrimitiveType.Cube, "Dot", rs.transform, new Vector3(0, 0.55f, 0), Quaternion.identity, new Vector3(0.6f, 0.2f, 0.12f));
+            Object.DestroyImmediate(rsDot.GetComponent<Collider>());
+            rsDot.GetComponent<Renderer>().sharedMaterial = GetOrCreateMaterial("MJ_PointStickDot", new Color(0.8f, 0.1f, 0.1f));
+            rs.SetActive(false);
+            riichiSticks[s] = rs;
 
             // Hand: 13 tiles plus the drawn tile set slightly apart
             for (int k = 0; k < 14; k++)
@@ -214,6 +261,23 @@ public static class MahjongTableBuilder
         sfx.maxDistance = 12f;
         sfx.rolloffMode = AudioRolloffMode.Linear;
 
+        // Point sticks for the end-of-hand animation: hidden until the game flies them between seats.
+        var stickMat = GetOrCreateMaterial("MJ_PointStick", new Color(0.97f, 0.97f, 0.95f));
+        var sticksGroup = new GameObject("PointSticks").transform;
+        sticksGroup.SetParent(root.transform, false);
+        var pointSticks = new Transform[24];
+        for (int k = 0; k < pointSticks.Length; k++)
+        {
+            var st = Prim(PrimitiveType.Cube, "Stick" + k, sticksGroup, new Vector3(0, TableY + 0.05f, 0), Quaternion.identity, new Vector3(0.018f, 0.008f, 0.1f) * S);
+            Object.DestroyImmediate(st.GetComponent<Collider>());
+            st.GetComponent<Renderer>().sharedMaterial = stickMat;
+            var dot = Prim(PrimitiveType.Cube, "Dot", st.transform, new Vector3(0, 0.55f, 0), Quaternion.identity, new Vector3(0.6f, 0.2f, 0.12f));
+            Object.DestroyImmediate(dot.GetComponent<Collider>());
+            dot.GetComponent<Renderer>().sharedMaterial = GetOrCreateMaterial("MJ_PointStickDot", new Color(0.8f, 0.1f, 0.1f));
+            st.SetActive(false);
+            pointSticks[k] = st.transform;
+        }
+
         game.rules = rules;
         game.threePlayer = threePlayer;
         if (threePlayer)
@@ -239,6 +303,13 @@ public static class MahjongTableBuilder
         game.announceTile = announceTile;
         game.announceText = announceText;
         game.announceCaption = announceCaption;
+        game.winTiles = winTiles;
+        game.winText = winText;
+        game.winTilePitch = Pitch * WinScale * 1.04f;
+        game.pointSticks = pointSticks;
+        game.deltaLabels = deltaLabels;
+        game.windMarkers = windMarkers;
+        game.riichiStickMarkers = riichiSticks;
         game.tableRenderers = tableRenderers;
         game.buttonRenderers = buttonRenderers.ToArray();
         game.sitButtonRenderers = sitButtonRenderers.ToArray();
@@ -269,6 +340,7 @@ public static class MahjongTableBuilder
             ApplyTiles(game.doraTiles, game);
             ApplyTiles(game.waitTiles, game);
             ApplyTiles(game.kitaTiles, game);
+            ApplyTiles(game.winTiles, game);
             ApplyRenderers(game.tableRenderers, game.tableMaterial);
             ApplyRenderers(game.buttonRenderers, game.buttonMaterial);
             ApplyRenderers(game.sitButtonRenderers, game.sitButtonMaterial);
