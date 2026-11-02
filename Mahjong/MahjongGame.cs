@@ -38,7 +38,9 @@ public class MahjongGame : UdonSharpBehaviour
     public Transform[] pointSticks;       // fly from the seats that paid to the seats that got paid
     public TMP_Text[] deltaLabels;        // each seat's points won or lost this hand
     public TMP_Text[] windMarkers;        // each seat's wind (and DEALER) on the table, facing the viewer
-    public GameObject[] riichiStickMarkers;     // a stick laid on the table in front of each seat's pond in riichi
+    public GameObject[] riichiStickMarkers;
+    public Transform[] windMarkerAnchors;  // the wind markers' and points labels' transforms (TMP_Text.transform isn't exposed to Udon)
+    public Transform[] deltaAnchors;     // a stick laid on the table in front of each seat's pond in riichi
     public AudioSource sfxSource;
     public Renderer[] tableRenderers;
     public Renderer[] buttonRenderers;
@@ -411,10 +413,10 @@ public class MahjongGame : UdonSharpBehaviour
         Vector3 head = local.GetTrackingData(VRCPlayerApi.TrackingDataType.Head).position;
         FaceToward(statusAnchor, head);
         FaceToward(announceAnchor, head);
-        if (windMarkers != null)
-            for (int s = 0; s < windMarkers.Length; s++) if (windMarkers[s] != null) FaceToward(windMarkers[s].transform, head);
-        if (deltaLabelsShown && deltaLabels != null)
-            for (int s = 0; s < deltaLabels.Length; s++) if (deltaLabels[s] != null) FaceToward(deltaLabels[s].transform, head);
+        if (windMarkerAnchors != null)
+            for (int s = 0; s < windMarkerAnchors.Length; s++) FaceToward(windMarkerAnchors[s], head);
+        if (deltaLabelsShown && deltaAnchors != null)
+            for (int s = 0; s < deltaAnchors.Length; s++) FaceToward(deltaAnchors[s], head);
     }
 
     void FaceToward(Transform t, Vector3 head)
@@ -974,7 +976,7 @@ public class MahjongGame : UdonSharpBehaviour
 
         if (bestRank == 0)
         {
-            if (chankan) FinishAddedKan(lastDiscarder);
+            if (chankan) FinishAddedKan(lastDiscarder, robKita);
             else AdvanceAfterDiscard();
             return;
         }
@@ -1073,15 +1075,14 @@ public class MahjongGame : UdonSharpBehaviour
             // Anyone waiting on that tile may rob the kan (chankan) before the replacement draw.
             if (OpenChankanWindow(s, added, false)) { Commit(); return; }
         }
-        FinishAddedKan(s);
+        FinishAddedKan(s, false);
         Commit();
     }
 
     /// The kan is final: kan dora flips, ippatsu and the first go-around end, and s draws a replacement tile.
     /// A kita (3-player) also ends here, with just the replacement draw.
-    void FinishAddedKan(int s)
+    void FinishAddedKan(int s, bool kita)
     {
-        bool kita = robKita;
         if (chankan)
         {
             chankan = false;
@@ -1161,7 +1162,7 @@ public class MahjongGame : UdonSharpBehaviour
         Announce("<color=#a0e0ff>KITA!</color>", s, KindKita, "");
         // Anyone waiting on North may ron it, like robbing a kan (but without the chankan yaku).
         if (OpenChankanWindow(s, id, true)) { Commit(); return; }
-        FinishAddedKan(s);
+        FinishAddedKan(s, true);
         Commit();
     }
 
@@ -2562,8 +2563,8 @@ public class MahjongGame : UdonSharpBehaviour
     Vector3 FlowPoint(int s)
     {
         Vector3 centre = doraAnchor != null ? doraAnchor.parent.TransformPoint(doraHome) + Vector3.up * 0.04f : transform.position + Vector3.up * 0.82f;
-        if (s >= 4 || deltaLabels == null || s >= deltaLabels.Length || deltaLabels[s] == null) return centre;
-        Vector3 p = deltaLabels[s].transform.position;
+        if (s >= 4 || deltaAnchors == null || s >= deltaAnchors.Length || deltaAnchors[s] == null) return centre;
+        Vector3 p = deltaAnchors[s].position;
         p.y = centre.y;
         return p;
     }

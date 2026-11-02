@@ -147,10 +147,10 @@ public static class MahjongTableBuilder
 
             // Seat wind marker: a plaque on the table left of the hand, with the wind standing over it
             // (billboards toward the viewer; gold with DEALER for the dealer).
-            var plaque = Prim(PrimitiveType.Cube, "WindPlaque", anchor, new Vector3(-0.6f * S, TableY + 0.004f, -0.8f * S), Quaternion.identity, new Vector3(0.09f, 0.008f, 0.09f) * S);
+            var plaque = Prim(PrimitiveType.Cube, "WindPlaque", anchor, new Vector3(-0.6f * S, TableY + 0.004f, -0.8f * S), Quaternion.identity, new Vector3(0.068f, 0.008f, 0.068f) * S);
             Object.DestroyImmediate(plaque.GetComponent<Collider>());
             plaque.GetComponent<Renderer>().sharedMaterial = GetOrCreateMaterial("MJ_WindMarker", new Color(0.12f, 0.12f, 0.14f));
-            windMarkers[s] = Text("WindMarker", anchor, new Vector3(-0.6f * S, TableY + 0.1f, -0.8f * S), Quaternion.identity, 0.7f, new Vector2(0.4f, 0.14f), Color.white, false);
+            windMarkers[s] = Text("WindMarker", anchor, new Vector3(-0.6f * S, TableY + 0.08f, -0.8f * S), Quaternion.identity, 0.5f, new Vector2(0.3f, 0.1f), Color.white, false);
             windMarkers[s].text = "";
             windMarkers[s].fontStyle = FontStyles.Bold;
             windMarkers[s].outlineWidth = 0.2f;
@@ -310,6 +310,13 @@ public static class MahjongTableBuilder
         game.deltaLabels = deltaLabels;
         game.windMarkers = windMarkers;
         game.riichiStickMarkers = riichiSticks;
+        game.windMarkerAnchors = new Transform[4];
+        game.deltaAnchors = new Transform[4];
+        for (int s = 0; s < 4; s++)
+        {
+            if (windMarkers[s] != null) game.windMarkerAnchors[s] = windMarkers[s].transform;
+            if (deltaLabels[s] != null) game.deltaAnchors[s] = deltaLabels[s].transform;
+        }
         game.tableRenderers = tableRenderers;
         game.buttonRenderers = buttonRenderers.ToArray();
         game.sitButtonRenderers = sitButtonRenderers.ToArray();
