@@ -32,6 +32,13 @@ public class MahjongGame : UdonSharpBehaviour
     public MahjongTile[] waitTiles;       // 4 seats x WaitSlots: the tiles you're waiting on (local only)
     public TMP_Text[] waitLabels;
     public MahjongTile[] kitaTiles;       // 4 seats x 4: Norths set aside (3-player only)
+    public MahjongTile[] winTiles;        // the winning hand, shown large above the table at hand over
+    public TMP_Text winText;
+    public float winTilePitch = 0.088f;
+    public Transform[] pointSticks;       // fly from the seats that paid to the seats that got paid
+    public TMP_Text[] deltaLabels;        // each seat's points won or lost this hand
+    public TMP_Text[] windMarkers;        // each seat's wind (and DEALER) on the table, facing the viewer
+    public GameObject[] riichiStickMarkers;     // a stick laid on the table in front of each seat's pond in riichi
     public AudioSource sfxSource;
     public Renderer[] tableRenderers;
     public Renderer[] buttonRenderers;
@@ -90,9 +97,9 @@ public class MahjongGame : UdonSharpBehaviour
     public AudioClip kitaSound;
     [Tooltip("Exhaustive or abortive draw.")]
     public AudioClip drawGameSound;
-    [Tooltip("At an exhaustive draw, each seat in turn (dealer first) says whether it was tenpai...")]
+    [Tooltip("At an exhaustive draw, played once for the table if anyone was tenpai...")]
     public AudioClip tenpaiSound;
-    [Tooltip("...or not (no-ten).")]
+    [Tooltip("...or this one if nobody was (no-ten).")]
     public AudioClip notenSound;
     [Range(0f, 1f)] public float soundVolume = 0.8f;
     [Tooltip("Random pitch change on each discard, so repeated clacks don't sound identical.")]
@@ -129,6 +136,16 @@ public class MahjongGame : UdonSharpBehaviour
 
     [Tooltip("How long call announcements (PON!, RIICHI! ...) stay up.")]
     public float announceSeconds = 2.5f;
+
+    [Header("End of hand")]
+    [Tooltip("Show the winning hand large above the table, facing every player, until the next hand starts.")]
+    public bool showWinningHand = true;
+    [Tooltip("Point sticks fly from the players who paid to the players who got paid, and the scores count over.")]
+    public bool animatePoints = true;
+    [Tooltip("Seconds after the win or draw before the points start moving.")]
+    public float pointFlowDelay = 1.2f;
+    [Tooltip("How long each point stick takes to cross the table.")]
+    public float pointStickSeconds = 0.7f;
 
     [Header("Bots")]
     [Tooltip("How long a bot 'thinks' before each move.")]
@@ -263,6 +280,10 @@ public class MahjongGame : UdonSharpBehaviour
     [UdonSynced] int[] kitaCount = new int[4];
     [UdonSynced] bool robKita = false;              // the ron-only window is for a North just set aside
     [UdonSynced] int drawTenpai = -1;               // tenpai seats (bitmask) at this hand's exhaustive draw
+    [UdonSynced] int[] handStartScores = new int[4];
+    [UdonSynced] int[] handDelta = new int[4];      // each seat's points won or lost this hand, for the point flow
+    [UdonSynced] int deltaSerial = 0;
+    [UdonSynced] string winSummary = "";            // the winning hand's yaku and value
 
     // ---- local only ----
     bool riichiArmed = false;
@@ -275,8 +296,18 @@ public class MahjongGame : UdonSharpBehaviour
     int selectedType = -1;          // during calls: which tile type you picked
     int selectedId = -1;            // on your turn: the tile raised for discard (click it again to discard)
     int heardDiscards = 0;          // discards already played a sound for
-    int drawVoiceStep = 0;          // which seat's tenpai / no-ten voice plays next
     int drawVoiceSerial = -1;
+    int shownDeltaSerial = 0;
+    bool flowing = false;           // point sticks in the air and scores counting over
+    float flowStart = 0f;
+    float flowEnd = 0f;
+    bool deltaLabelsShown = false;
+    int stickCount = 0;
+    int[] stickFrom = new int[32];  // seat, or 4 for the table (riichi sticks)
+    int[] stickTo = new int[32];
+    bool[] stickShown = new bool[32];
+    float[] winX = new float[24];
+    const float StickGap = 0.09f;
     int autoDiscardKey = -1;        // owner only
     int[] waitKey = { -1, -1, -1, -1 };
     bool[] waitFound = new bool[34];
@@ -291,7 +322,7 @@ public class MahjongGame : UdonSharpBehaviour
     int discardHintTint = 0;
     int[] displayIds = new int[56];
     int[] slotCode = new int[28];
-    MahjongTile[] shineList = new MahjongTile[64];
+    MahjongTile[] shineList = new MahjongTile[96];
     Vector3[] pondHome = new Vector3[4];
     Quaternion[] pondHomeRot = new Quaternion[4];
     bool pondHomeSaved = false;
@@ -326,6 +357,7 @@ public class MahjongGame : UdonSharpBehaviour
         ApplyTileMaterials(meldTiles);
         ApplyTileMaterials(doraTiles);
         ApplyTileMaterials(kitaTiles);
+        ApplyTileMaterials(winTiles);
         if (announceTile != null)
         {
             announceTile.SetMaterials(tileMaterial, tileBackMaterial, tileFaceMaterial);
@@ -373,11 +405,16 @@ public class MahjongGame : UdonSharpBehaviour
             announceHideTime = 0f;
             announceText.text = "";
         }
+        if (flowing) UpdateFlow();
         VRCPlayerApi local = Networking.LocalPlayer;
         if (!Utilities.IsValid(local)) return;
         Vector3 head = local.GetTrackingData(VRCPlayerApi.TrackingDataType.Head).position;
         FaceToward(statusAnchor, head);
         FaceToward(announceAnchor, head);
+        if (windMarkers != null)
+            for (int s = 0; s < windMarkers.Length; s++) if (windMarkers[s] != null) FaceToward(windMarkers[s].transform, head);
+        if (deltaLabelsShown && deltaLabels != null)
+            for (int s = 0; s < deltaLabels.Length; s++) if (deltaLabels[s] != null) FaceToward(deltaLabels[s].transform, head);
     }
 
     void FaceToward(Transform t, Vector3 head)
@@ -396,6 +433,7 @@ public class MahjongGame : UdonSharpBehaviour
             receivedState = true;
             shownAnnounceSerial = announceSerial;
             heardDiscards = TotalDiscards();
+            shownDeltaSerial = deltaSerial;
         }
         Refresh();
     }
@@ -685,6 +723,7 @@ public class MahjongGame : UdonSharpBehaviour
             int t = wall[i]; wall[i] = wall[j]; wall[j] = t;
         }
         ClearTable();
+        for (int s = 0; s < 4; s++) handStartScores[s] = scores[s];
         for (int s = 0; s < Seats(); s++)
             for (int k = 0; k < 13; k++)
                 hands[s * HandSlots + k] = wall[wallPos++];
@@ -729,6 +768,7 @@ public class MahjongGame : UdonSharpBehaviour
         chankan = false;
         winSeat = -1;
         winTile = -1;
+        winSummary = "";
     }
 
     void DrawTile(int s, bool rinshan)
@@ -1180,6 +1220,7 @@ public class MahjongGame : UdonSharpBehaviour
         if (!Evaluate(s, -1, drawn[s], true)) { lastEvent = "No yaku - can't win with that hand."; Commit(); return; }
         winSeat = s;
         winTile = drawn[s];
+        winSummary = ResultLine();
 
         int b = rules.resultBase;
         int total = 0;
@@ -1205,6 +1246,7 @@ public class MahjongGame : UdonSharpBehaviour
         Evaluate(s, lastDiscard, lastDiscard, false);
         winSeat = s;
         winTile = lastDiscard;
+        winSummary = ResultLine();
         if (chankan && robKita) UndoKita(lastDiscarder, lastDiscard);
         else if (chankan) UndoAddedKan(lastDiscarder, lastDiscard);
         int pay = rules.RoundUp100(rules.resultBase * (s == dealer ? 6 : 4)) + 300 * honba;
@@ -1303,6 +1345,8 @@ public class MahjongGame : UdonSharpBehaviour
     {
         renchan = dealerKeeps;
         drawHand = isDraw;
+        for (int s = 0; s < 4; s++) handDelta[s] = scores[s] - handStartScores[s];
+        deltaSerial++;
         pendingRiichi = -1;
         bool bust = false;
         for (int s = 0; s < 4; s++) if (scores[s] < 0) bust = true;
@@ -2027,6 +2071,11 @@ public class MahjongGame : UdonSharpBehaviour
         if (phase != PhaseCalls && phase != PhaseTurn) selectedType = -1;
         if (phase != PhaseTurn || !ControlsSeat(turn) || SlotOf(turn, selectedId) < 0) selectedId = -1;
         PlayEventSounds();
+        if (deltaSerial != shownDeltaSerial)
+        {
+            shownDeltaSerial = deltaSerial;
+            StartFlow();
+        }
         if (phase == PhaseTurn && ControlsSeat(turn)) UpdateTurnHints();
         else hintTsumo = false;
         discardHintTint = CallHintTint();
@@ -2053,6 +2102,8 @@ public class MahjongGame : UdonSharpBehaviour
         }
 
         RefreshAnnouncer();
+        RefreshWinDisplay();
+        RefreshDeltas();
         UpdateButtons();
         RebuildShineList();
         if (statusText != null) statusText.text = BuildStatus();
@@ -2166,6 +2217,7 @@ public class MahjongGame : UdonSharpBehaviour
         AddShining(meldTiles);
         AddShining(waitTiles);
         AddShining(kitaTiles);
+        AddShining(winTiles);
         if (announceTile != null && announceTile.shining && shineCount < shineList.Length) shineList[shineCount++] = announceTile;
     }
 
@@ -2319,7 +2371,6 @@ public class MahjongGame : UdonSharpBehaviour
                 PlaySound(drawGameSound, 1f);
                 if (drawTenpai >= 0 && (tenpaiSound != null || notenSound != null))
                 {
-                    drawVoiceStep = 0;
                     drawVoiceSerial = announceSerial;
                     SendCustomEventDelayedSeconds(nameof(_DrawVoice), 0.9f);
                 }
@@ -2338,14 +2389,191 @@ public class MahjongGame : UdonSharpBehaviour
         if (announceCaption != null) announceCaption.text = show ? SeatName(lastDiscarder) + (chankan ? " added to a kan" : " discarded") : "";
     }
 
-    /// Local: after an exhaustive draw, each seat's "tenpai" or "no-ten" in turn, dealer first.
+    /// Local: after an exhaustive draw, one voice for the whole table: "tenpai" if anyone was ready, else "no-ten".
     public void _DrawVoice()
     {
-        if (drawVoiceSerial != announceSerial || drawTenpai < 0 || drawVoiceStep >= Seats()) return;
-        int s = (dealer + drawVoiceStep) % Seats();
-        PlaySound((drawTenpai & (1 << s)) != 0 ? tenpaiSound : notenSound, 1f);
-        drawVoiceStep++;
-        if (drawVoiceStep < Seats()) SendCustomEventDelayedSeconds(nameof(_DrawVoice), 0.8f);
+        if (drawVoiceSerial != announceSerial || drawTenpai < 0) return;
+        drawVoiceSerial = -1;
+        PlaySound(drawTenpai != 0 ? tenpaiSound : notenSound, 1f);
+    }
+
+    // ================= end of hand =================
+
+    /// Everyone sees the winner's hand large above the table: the closed tiles, the winning tile set apart and lit,
+    /// then the called sets, with the yaku underneath. It stays up until the next hand starts.
+    void RefreshWinDisplay()
+    {
+        bool show = showWinningHand && winSeat >= 0 && winTile >= 0 && (phase == PhaseHandOver || phase == PhaseGameOver);
+        if (winText != null) winText.text = show ? winSummary : "";
+        if (winTiles == null) return;
+        int n = 0;
+        float u = 0f;
+        if (show)
+        {
+            int s = winSeat;
+            // RefreshHand has just sorted the closed tiles into displayIds; the last slot is the winning tile.
+            for (int k = 0; k < HandSlots - 1; k++)
+            {
+                int id = displayIds[s * HandSlots + k];
+                if (id < 0) continue;
+                n = PlaceWinTile(n, u, id, 0, false);
+                u += 1f;
+            }
+            u += 0.4f;
+            n = PlaceWinTile(n, u, winTile, 4, false);
+            u += 1f;
+            for (int m = 0; m < meldCount[s]; m++)
+            {
+                u += 0.4f;
+                bool closedKan = meldKinds[s * 4 + m] == MahjongRules.MeldClosedKan;
+                for (int k = 0; k < 4; k++)
+                {
+                    int id = melds[s * MeldSlots + m * 4 + k];
+                    if (id < 0) continue;
+                    n = PlaceWinTile(n, u, id, 0, closedKan && (k == 0 || k == 3));
+                    u += 1f;
+                }
+            }
+        }
+        // Centre the row on the announcer.
+        float half = (u - 1f) * 0.5f;
+        for (int i = 0; i < winTiles.Length; i++)
+        {
+            if (winTiles[i] == null) continue;
+            if (i >= n || i >= winX.Length) { winTiles[i].Hide(); continue; }
+            Vector3 p = winTiles[i].transform.localPosition;
+            p.x = (winX[i] - half) * winTilePitch;
+            winTiles[i].transform.localPosition = p;
+        }
+    }
+
+    int PlaceWinTile(int n, float u, int id, int tint, bool back)
+    {
+        if (n >= winTiles.Length || n >= winX.Length || winTiles[n] == null) return n + 1;
+        winX[n] = u;
+        if (back) winTiles[n].ShowBack();
+        else winTiles[n].ShowFace(id, tint);
+        return n + 1;
+    }
+
+    /// Each seat's + or - for the hand, floating over its side of the table once the points start moving.
+    void RefreshDeltas()
+    {
+        bool show = (phase == PhaseHandOver || phase == PhaseGameOver) && (!flowing || Time.time >= flowStart);
+        deltaLabelsShown = show;
+        if (deltaLabels == null) return;
+        for (int s = 0; s < deltaLabels.Length && s < 4; s++)
+        {
+            if (deltaLabels[s] == null) continue;
+            int d = handDelta[s];
+            if (!show || d == 0 || s >= Seats()) deltaLabels[s].text = "";
+            else deltaLabels[s].text = d > 0 ? "<color=#66ff66>+" + d + "</color>" : "<color=#ff6666>" + d + "</color>";
+        }
+    }
+
+    /// Local: point sticks for this hand's payments. Each payment from a seat that lost points to a seat that
+    /// gained them gets sticks in proportion to its size. Riichi sticks on the table count as the table (4).
+    void StartFlow()
+    {
+        EndFlow();
+        if (!animatePoints || (phase != PhaseHandOver && phase != PhaseGameOver)) return;
+        int[] owe = new int[5];
+        int[] gain = new int[5];
+        int lost = 0;
+        int won = 0;
+        for (int s = 0; s < 4; s++)
+        {
+            if (handDelta[s] < 0) { owe[s] = -handDelta[s]; lost += owe[s]; }
+            else { gain[s] = handDelta[s]; won += gain[s]; }
+        }
+        if (won == 0 && lost == 0) return;
+        if (won > lost) owe[4] = won - lost;
+        else gain[4] = lost - won;
+        int total = Mathf.Max(won, lost);
+        int max = pointSticks != null ? Mathf.Min(pointSticks.Length, stickFrom.Length) : 0;
+        int i = 0;
+        int j = 0;
+        stickCount = 0;
+        while (i < 5 && j < 5)
+        {
+            if (owe[i] <= 0) { i++; continue; }
+            if (gain[j] <= 0) { j++; continue; }
+            int m = Mathf.Min(owe[i], gain[j]);
+            owe[i] -= m;
+            gain[j] -= m;
+            int sticks = Mathf.Max(1, Mathf.RoundToInt(m * 10f / total));
+            for (int k = 0; k < sticks && stickCount < max; k++)
+            {
+                stickFrom[stickCount] = i;
+                stickTo[stickCount] = j;
+                stickCount++;
+            }
+        }
+        flowStart = Time.time + pointFlowDelay;
+        flowEnd = flowStart + Mathf.Max(0, stickCount - 1) * StickGap + Mathf.Max(0.05f, pointStickSeconds);
+        flowing = true;
+    }
+
+    void UpdateFlow()
+    {
+        if (phase != PhaseHandOver && phase != PhaseGameOver) { EndFlow(); return; }
+        float now = Time.time;
+        float len = Mathf.Max(0.05f, pointStickSeconds);
+        for (int k = 0; k < stickCount; k++)
+        {
+            Transform st = pointSticks[k];
+            if (st == null) continue;
+            float t = (now - flowStart - k * StickGap) / len;
+            bool on = t > 0f && t < 1f;
+            if (on != stickShown[k]) { st.gameObject.SetActive(on); stickShown[k] = on; }
+            if (!on) continue;
+            Vector3 a = FlowPoint(stickFrom[k]);
+            Vector3 b = FlowPoint(stickTo[k]);
+            float e = t * t * (3f - 2f * t);
+            st.position = Vector3.Lerp(a, b, e) + Vector3.up * (Mathf.Sin(t * Mathf.PI) * 0.3f);
+            Vector3 d = b - a;
+            d.y = 0f;
+            if (d.sqrMagnitude > 0.0001f) st.rotation = Quaternion.LookRotation(d);
+        }
+        if (now >= flowStart)
+        {
+            for (int s = 0; s < 4; s++) RefreshLabel(s, true);
+            if (!deltaLabelsShown) RefreshDeltas();
+        }
+        if (now >= flowEnd)
+        {
+            EndFlow();
+            for (int s = 0; s < 4; s++) RefreshLabel(s, phase != PhaseLobby);
+        }
+    }
+
+    void EndFlow()
+    {
+        flowing = false;
+        if (pointSticks == null) return;
+        for (int k = 0; k < pointSticks.Length && k < stickShown.Length; k++)
+        {
+            if (pointSticks[k] != null && stickShown[k]) pointSticks[k].gameObject.SetActive(false);
+            stickShown[k] = false;
+        }
+    }
+
+    /// Where point sticks leave from and land: over each seat's side of the table, or the middle for the table.
+    Vector3 FlowPoint(int s)
+    {
+        Vector3 centre = doraAnchor != null ? doraAnchor.parent.TransformPoint(doraHome) + Vector3.up * 0.04f : transform.position + Vector3.up * 0.82f;
+        if (s >= 4 || deltaLabels == null || s >= deltaLabels.Length || deltaLabels[s] == null) return centre;
+        Vector3 p = deltaLabels[s].transform.position;
+        p.y = centre.y;
+        return p;
+    }
+
+    /// A seat's score as shown on its name tag: counts from the old score to the new one while the points move.
+    int ShownScore(int s)
+    {
+        if (!flowing || Time.time < flowStart) return flowing ? scores[s] - handDelta[s] : scores[s];
+        float p = Mathf.Clamp01((Time.time - flowStart) / Mathf.Max(0.05f, flowEnd - flowStart));
+        return scores[s] - Mathf.RoundToInt(handDelta[s] * (1f - p) / 100f) * 100;
     }
 
     // ================= sounds =================
@@ -2640,16 +2868,34 @@ public class MahjongGame : UdonSharpBehaviour
     void RefreshLabel(int s, bool inHand)
     {
         if (seatLabels == null || s >= seatLabels.Length || seatLabels[s] == null) return;
+        RefreshMarkers(s, inHand);
         string name = seatPlayers[s] != -1 ? SeatName(s) : compassNames[s] + " (empty)";
         if (!inHand)
         {
-            seatLabels[s].text = phase == PhaseLobby && scores[s] == 0 ? name : name + "\n" + scores[s];
+            seatLabels[s].text = phase == PhaseLobby && scores[s] == 0 ? name : name + "\n" + ShownScore(s);
             return;
         }
-        string text = "[" + windNames[SeatWind(s)] + "] " + name + "\n" + scores[s];
+        string text = "[" + windNames[SeatWind(s)] + "] " + name + "\n" + ShownScore(s);
         if (riichi[s]) text += "  <color=#ff6666>RIICHI</color>";
         bool active = (phase == PhaseTurn && s == turn) || (phase == PhaseCalls && callResponse[s] == RespPending);
         seatLabels[s].text = active ? "<color=#ffdd33>" + text + "</color>" : text;
+    }
+
+    /// The seat's wind on the table (gold with DEALER under it for the dealer), and its riichi stick.
+    void RefreshMarkers(int s, bool inHand)
+    {
+        bool seated = s < Seats();
+        if (windMarkers != null && s < windMarkers.Length && windMarkers[s] != null)
+        {
+            if (!inHand || !seated) windMarkers[s].text = "";
+            else if (s == dealer) windMarkers[s].text = "<color=#ffcc33>" + windNames[SeatWind(s)].ToUpper() + "</color>\n<size=45%><color=#ffcc33>DEALER</color></size>";
+            else windMarkers[s].text = windNames[SeatWind(s)].ToUpper();
+        }
+        if (riichiStickMarkers != null && s < riichiStickMarkers.Length && riichiStickMarkers[s] != null)
+        {
+            bool on = inHand && seated && riichi[s];
+            if (riichiStickMarkers[s].activeSelf != on) riichiStickMarkers[s].SetActive(on);
+        }
     }
 
     string BuildStatus()
